@@ -2,10 +2,12 @@ import asyncio
 import time
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
-                    Set, Tuple, Type, Union)
+                    Set, Tuple, Type, Union, Awaitable)
 
 from transformers import PreTrainedTokenizer
 
+from vllm.core.block_manager_v1 import BlockSpaceManagerV1
+from vllm.utils import Device
 import vllm.envs as envs
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
@@ -199,6 +201,9 @@ class RequestTracker:
 
 class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.finished_prefill: Optional[asyncio.Queue] = None
 
     async def step_async(
             self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
@@ -243,6 +248,22 @@ class _AsyncLLMEngine(LLMEngine):
             # queued control plane messages, such as add/remove lora adapters.
             await self.model_executor.stop_remote_worker_execution_loop_async()
 
+        if self.finished_prefill is not None:
+            prefill_info = (seq_group_metadata_list, scheduler_outputs)
+            # increase the block ref count to prevent them from being freed.
+            block_manager = self.scheduler.block_manager
+            assert isinstance(block_manager, BlockSpaceManagerV1), \
+                "Only BlockSpaceManagerV1 is supported"
+            for seq_group in scheduler_outputs.scheduled_seq_groups:
+                for seq in seq_group.get_seqs():
+                    block_manager.access_all_blocks_in_seq(seq, time.time())
+                    block_table = block_manager.block_tables[seq]
+                    for block in set(block_table):
+                        block.ref_count += 1
+
+            self.finished_prefill.put_nowait(prefill_info)
+        
+        
         return request_outputs
 
     async def process_model_inputs_async(
@@ -350,6 +371,9 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
+        self.finished_prefill: Optional[asyncio.Queue] = None
+        self.prefill_handler: Optional[Callable[[asyncio.Queue], Awaitable[None]]] = None
+
     @classmethod
     def from_engine_args(
         cls,
@@ -425,6 +449,10 @@ class AsyncLLMEngine:
         else:
             return self.engine.get_tokenizer()
 
+    def set_finished_prefill(self, handler: Callable[[asyncio.Queue], Awaitable[None]]) -> None:
+        self.prefill_handler = handler
+
+
     def start_background_loop(self) -> None:
         """Start the background loop."""
         if self.errored:
@@ -434,6 +462,11 @@ class AsyncLLMEngine:
             raise RuntimeError("Background loop is already running.")
         # Initialize the RequestTracker here so it uses the right event loop.
         self._request_tracker = RequestTracker()
+        
+        if self.prefill_handler:
+            self.finished_prefill = asyncio.Queue()
+            self.engine.finished_prefill  = self.finished_prefill
+            asyncio.get_event_loop().create_task(self.prefill_handler(self.finished_prefill))
 
         self._background_loop_unshielded = asyncio.get_event_loop(
         ).create_task(self.run_engine_loop())
@@ -498,6 +531,10 @@ class AsyncLLMEngine:
         for request_output in request_outputs:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
+
+        if self.finished_prefill:
+            await self._engine_abort([req.request_id for req in request_outputs])
+            await asyncio.sleep(0)
 
         return len(request_outputs) > 0
 
