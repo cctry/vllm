@@ -6,8 +6,6 @@ from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
 
 from transformers import PreTrainedTokenizer
 
-from vllm.core.block_manager_v1 import BlockSpaceManagerV1
-from vllm.utils import Device
 import vllm.envs as envs
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
@@ -201,9 +199,6 @@ class RequestTracker:
 
 class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.finished_prefill: Optional[asyncio.Queue] = None
 
     async def step_async(
             self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
@@ -248,21 +243,6 @@ class _AsyncLLMEngine(LLMEngine):
             # queued control plane messages, such as add/remove lora adapters.
             await self.model_executor.stop_remote_worker_execution_loop_async()
 
-        if self.finished_prefill is not None:
-            prefill_info = (seq_group_metadata_list, scheduler_outputs)
-            # increase the block ref count to prevent them from being freed.
-            block_manager = self.scheduler.block_manager
-            assert isinstance(block_manager, BlockSpaceManagerV1), \
-                "Only BlockSpaceManagerV1 is supported"
-            for seq_group in scheduler_outputs.scheduled_seq_groups:
-                for seq in seq_group.get_seqs():
-                    block_manager.access_all_blocks_in_seq(seq, time.time())
-                    block_table = block_manager.block_tables[seq]
-                    for block in set(block_table):
-                        block.ref_count += 1
-
-            self.finished_prefill.put_nowait(prefill_info)
-        
         
         return request_outputs
 
@@ -371,8 +351,8 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
-        self.finished_prefill: Optional[asyncio.Queue] = None
-        self.prefill_handler: Optional[Callable[[asyncio.Queue], Awaitable[None]]] = None
+        self.is_prefill = None
+        self.is_decode = None
 
     @classmethod
     def from_engine_args(
@@ -449,8 +429,14 @@ class AsyncLLMEngine:
         else:
             return self.engine.get_tokenizer()
 
-    def set_finished_prefill(self, handler: Callable[[asyncio.Queue], Awaitable[None]]) -> None:
-        self.prefill_handler = handler
+    def set_prefill(self) -> None:
+        self.is_prefill = True
+
+    def set_decode(self) -> None:
+        self.is_decode = True
+
+    def set_decode_handler(self, handler: Callable[[asyncio.Queue], Awaitable[None]]) -> None:
+        self.is_decode = True
 
 
     def start_background_loop(self) -> None:
@@ -463,11 +449,6 @@ class AsyncLLMEngine:
         # Initialize the RequestTracker here so it uses the right event loop.
         self._request_tracker = RequestTracker()
         
-        if self.prefill_handler:
-            self.finished_prefill = asyncio.Queue()
-            self.engine.finished_prefill  = self.finished_prefill
-            asyncio.get_event_loop().create_task(self.prefill_handler(self.finished_prefill))
-
         self._background_loop_unshielded = asyncio.get_event_loop(
         ).create_task(self.run_engine_loop())
         self._background_loop_unshielded.add_done_callback(
@@ -527,14 +508,35 @@ class AsyncLLMEngine:
         else:
             request_outputs = await self.engine.step_async()
 
+        # prefill worker logic
+        if self.is_prefill:
+            scheduler = self.engine.scheduler
+            block_manager = scheduler.block_manager
+
+            for request_output in request_outputs:
+                block_tables = []
+                seq_groups = [s for s in scheduler.running if s.request_id == request_output.request_id]
+                assert len(seq_groups) == 1, "Found multiple seq_groups for the same request_id"
+                # increase the block ref count to prevent them from being freed.
+                for seq in seq_groups[0].get_seqs():
+                    block_manager.access_all_blocks_in_seq(seq, time.time())
+                    block_table = block_manager.block_tables[seq.seq_id]
+                    for block in set(block_table):
+                        block.ref_count += 1
+                    block_tables.append(block_table)
+                # append needed states to request_output
+                request_output.block_tables = block_tables
+                request_output.seq_groups = seq_groups
+                
+                # stop this request from being processed again
+                request_output.finished = True
+
+
         # Put the outputs into the corresponding streams.
         for request_output in request_outputs:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
 
-        if self.finished_prefill:
-            await self._engine_abort([req.request_id for req in request_outputs])
-            await asyncio.sleep(0)
 
         return len(request_outputs) > 0
 
