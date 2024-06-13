@@ -351,8 +351,8 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
-        self.is_prefill = None
-        self.is_decode = None
+        self.is_prefill_worker = None
+        self.is_decode_woker = None
 
     @classmethod
     def from_engine_args(
@@ -429,15 +429,11 @@ class AsyncLLMEngine:
         else:
             return self.engine.get_tokenizer()
 
-    def set_prefill(self) -> None:
-        self.is_prefill = True
+    def set_prefill_worker(self) -> None:
+        self.is_prefill_worker = True
 
-    def set_decode(self) -> None:
-        self.is_decode = True
-
-    def set_decode_handler(self, handler: Callable[[asyncio.Queue], Awaitable[None]]) -> None:
-        self.is_decode = True
-
+    def set_decode_worker(self) -> None:
+        self.is_decode_worker = True
 
     def start_background_loop(self) -> None:
         """Start the background loop."""
@@ -509,12 +505,11 @@ class AsyncLLMEngine:
             request_outputs = await self.engine.step_async()
 
         # prefill worker logic
-        if self.is_prefill:
+        if self.is_prefill_worker:
             scheduler = self.engine.scheduler
             block_manager = scheduler.block_manager
 
             for request_output in request_outputs:
-                block_tables = []
                 seq_groups = [s for s in scheduler.running if s.request_id == request_output.request_id]
                 assert len(seq_groups) == 1, "Found multiple seq_groups for the same request_id"
                 # increase the block ref count to prevent them from being freed.
@@ -523,11 +518,8 @@ class AsyncLLMEngine:
                     block_table = block_manager.block_tables[seq.seq_id]
                     for block in set(block_table):
                         block.ref_count += 1
-                    block_tables.append(block_table)
                 # append needed states to request_output
-                request_output.block_tables = block_tables
-                request_output.seq_groups = seq_groups
-                
+                request_output.seq_group = seq_groups[0]        
                 # stop this request from being processed again
                 request_output.finished = True
 
@@ -558,7 +550,7 @@ class AsyncLLMEngine:
             # (eg. NCCL timeouts).
             try:
                 has_requests_in_progress = await asyncio.wait_for(
-                    self.engine_step(), ENGINE_ITERATION_TIMEOUT_S)
+                    self.engine_step(), 3600)
             except asyncio.TimeoutError as exc:
                 logger.error(
                     "Engine iteration timed out. This should never happen!")
