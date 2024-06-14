@@ -19,9 +19,9 @@ import base64
 import aiohttp
 
 
-def serialize_seq_group(seq_group: SequenceGroup) -> bytes:
+def serialize_seq_group(seq_group: SequenceGroup) -> str:
     data = pickle.dumps(seq_group)
-    return base64.b64encode(data)
+    return base64.b64encode(data).decode("utf-8")
 
 
 class DecodeWorker:
@@ -56,11 +56,16 @@ class DecodeWorker:
 
 # global states for this perfill worker
 engine = None
-decode_workers: Dict[str, DecodeWorker] = []
+decode_workers: Dict[str, DecodeWorker] = {}
 prefilled_seqs: Dict[str, SequenceGroup] = {}
 app = FastAPI()
-client_session = aiohttp.ClientSession()
+client_session: aiohttp.ClientSession
 
+
+decode_workers["0.0.0.0"] = DecodeWorker("0.0.0.0", 8001, "0.0.0.0", 8101)
+
+async def get_decode_worker() -> DecodeWorker:
+    return decode_workers["0.0.0.0"]
 
 @app.post("/kv_cache")
 async def kv_cache(request: Request) -> Response:
@@ -87,7 +92,7 @@ async def kv_cache(request: Request) -> Response:
 
 async def send_prefilled_seq(prefilled_seq: SequenceGroup):
     decode_worker = await get_decode_worker()  # TODO: Mock this function
-    await decode_worker.send_prefill_results(prefilled_seq)
+    await decode_worker.send_prefilled_seq(prefilled_seq)
 
 
 @app.post("/prefill")
@@ -119,6 +124,12 @@ async def prefill(request: Request) -> Response:
     # TODO: We may need to get the full text from decode worker and then return it to the client
     return Response(status_code=200)
 
+async def run(config: uvicorn.Config):
+    global client_session
+    client_session = aiohttp.ClientSession()
+    server = uvicorn.Server(config=config)
+    await server.serve()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -140,10 +151,11 @@ if __name__ == "__main__":
     )
     engine.set_prefill_worker()
 
-    app.root_path = args.root_path
-    uvicorn.run(
-        app,
+    config = uvicorn.Config(
+        app=app,
         host=args.host,
         port=args.port,
         log_level=args.log_level,
     )
+
+    asyncio.run(run(config))
