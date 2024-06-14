@@ -2,7 +2,7 @@ import asyncio
 import time
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
-                    Set, Tuple, Type, Union, Awaitable)
+                    Set, Tuple, Type, Union)
 
 from transformers import PreTrainedTokenizer
 
@@ -243,7 +243,6 @@ class _AsyncLLMEngine(LLMEngine):
             # queued control plane messages, such as add/remove lora adapters.
             await self.model_executor.stop_remote_worker_execution_loop_async()
 
-        
         return request_outputs
 
     async def process_model_inputs_async(
@@ -444,7 +443,7 @@ class AsyncLLMEngine:
             raise RuntimeError("Background loop is already running.")
         # Initialize the RequestTracker here so it uses the right event loop.
         self._request_tracker = RequestTracker()
-        
+
         self._background_loop_unshielded = asyncio.get_event_loop(
         ).create_task(self.run_engine_loop())
         self._background_loop_unshielded.add_done_callback(
@@ -528,7 +527,6 @@ class AsyncLLMEngine:
         for request_output in request_outputs:
             self._request_tracker.process_request_output(
                 request_output, verbose=self.log_requests)
-
 
         return len(request_outputs) > 0
 
