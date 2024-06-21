@@ -97,10 +97,15 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 worker_module_name = "vllm.worker.worker"
                 worker_class_name = "Worker"
 
+            if os.environ.get("WORKER_MODULE") and os.environ.get("WORKER_CLASS"):
+                worker_module_name = os.environ.get("WORKER_MODULE")
+                worker_class_name = os.environ.get("WORKER_CLASS")
+
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
+                concurrency_groups={"kv": 4},
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(
                 worker_module_name=worker_module_name,

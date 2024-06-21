@@ -42,6 +42,10 @@ try:
             output = pickle.dumps(output)
             return output
 
+        @ray.method(concurrency_group="kv")
+        def execute_kv_method(self, method, *args, **kwargs):
+            return self.execute_method(method, *args, **kwargs)
+
 except ImportError as e:
     logger.warning(
         "Failed to import Ray with %r. For multi-node inference, "

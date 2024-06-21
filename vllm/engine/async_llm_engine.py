@@ -350,8 +350,8 @@ class AsyncLLMEngine:
         # Lazy initialized fields
         self._request_tracker: RequestTracker
 
-        self.is_prefill_worker = None
-        self.is_decode_woker = None
+        self.is_prefill_worker = False
+        self.is_decode_woker = False
 
     @classmethod
     def from_engine_args(
@@ -429,9 +429,11 @@ class AsyncLLMEngine:
             return self.engine.get_tokenizer()
 
     def set_prefill_worker(self) -> None:
+        assert self.is_running, "Please start the background loop first."
         self.is_prefill_worker = True
 
     def set_decode_worker(self) -> None:
+        assert self.is_running, "Please start the background loop first."
         self.is_decode_worker = True
 
     def start_background_loop(self) -> None:
