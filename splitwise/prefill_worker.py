@@ -1,98 +1,44 @@
 import argparse
-import json
-import ssl
-from typing import AsyncGenerator, List, Dict
 import asyncio
+import os
+import time
+from typing import Set
 
+import aiohttp
 import uvicorn
+import uvloop
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
+from utils import call_kv_method, serialize_seq_group, make_done_callback
 
-from vllm.sequence import SequenceGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import SequenceGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid, make_async
-import pickle
-import base64
-import aiohttp
-
-
-def serialize_seq_group(seq_group: SequenceGroup) -> str:
-    data = pickle.dumps(seq_group)
-    return base64.b64encode(data).decode("utf-8")
-
-
-class DecodeWorker:
-    def __init__(
-        self, decode_addr: str, decode_port: int, kv_addr: str, kv_port: int
-    ):
-        self.decode_addr = decode_addr
-        self.decode_port = decode_port
-        self.kv_addr = kv_addr
-        self.kv_port = kv_port
-        # TODO: create ucx connection
-
-    async def send_prefilled_seq(self, prefilled_seq: SequenceGroup):
-        data = await make_async(serialize_seq_group)(
-            prefilled_seq
-        )  # FIXME: This may not correct
-        url = f"http://{self.decode_addr}:{self.decode_port}/decode"
-        async with client_session.post(
-            url, json={"seq_group": data}
-        ) as response:
-            assert response.ok
-
-    async def start_kv_cahce_comm(self, block_ids: List[int]):
-        """Start KV cache transfer on TP workers
-        KV cache are stored on TP workers.
-        TP workers on decode workers will run a ucx server listening for blocks
-        TP workers on prefill workers will send blocks to decode workers
-        TODO: Handling different TP
-        """
-        pass  # TODO
+from vllm.utils import make_async
 
 
 # global states for this perfill worker
 engine = None
-decode_workers: Dict[str, DecodeWorker] = {}
-prefilled_seqs: Dict[str, SequenceGroup] = {}
 app = FastAPI()
 client_session: aiohttp.ClientSession
+background_tasks: Set[asyncio.Task] = set()
 
 
-decode_workers["0.0.0.0"] = DecodeWorker("0.0.0.0", 8001, "0.0.0.0", 8101)
-
-async def get_decode_worker() -> DecodeWorker:
-    return decode_workers["0.0.0.0"]
-
-@app.post("/kv_cache")
-async def kv_cache(request: Request) -> Response:
-    """Handle KV cache pulling.
-
-    The request should be a JSON object with the following fields:
-    - request_id: request id for the prefilled request
-    """
-    request_dict = await request.json()
-    request_id = request_dict["request_id"]
+def push_kv_cache(seq_group: SequenceGroup):
     block_manager = engine.engine.scheduler.block_manager
     # we assume there is only one seq in the sequence group (prompt)
-    seq = prefilled_seqs.pop(request_id).get_seqs()[0]
+    seq = seq_group.get_seqs()[0]
     block_ids = block_manager.get_block_table(seq)
-    decode_worker = decode_workers[request.client.host]
-    task = asyncio.get_running_loop().create_task(
-        decode_worker.start_kv_cahce_comm(block_ids)
+    request_id = seq_group.request_id
+    task = asyncio.create_task(
+        call_kv_method(engine, "push_kv", request_id, block_ids)
     )
-    # free the cache blocks
-    # Hopefully, this is compatiable with prefix caching.
-    task.add_done_callback(lambda _: block_manager.free(seq))
-    return Response(status_code=200)
-
-
-async def send_prefilled_seq(prefilled_seq: SequenceGroup):
-    decode_worker = await get_decode_worker()  # TODO: Mock this function
-    await decode_worker.send_prefilled_seq(prefilled_seq)
+    background_tasks.add(task)
+    task.add_done_callback(
+        make_done_callback(background_tasks, lambda _: block_manager.free(seq))
+    )
 
 
 @app.post("/prefill")
@@ -101,31 +47,42 @@ async def prefill(request: Request) -> Response:
 
     The request should be a JSON object with the following fields:
     - prompt: the prompt to use for the generation.
+    - request_id: the request id.
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
+    request_id = request_dict.pop("request_id")
     sampling_params = SamplingParams(**request_dict)
-    request_id = random_uuid()
 
     assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     final_output = None
     async for request_output in results_generator:
-        assert final_output is None, "Only one output is expected"
+        if engine.is_prefill_worker:
+            assert final_output is None, "Only one output is expected"
         final_output = request_output
+        print(
+            "Complete at",
+            time.time(),
+            [output.text for output in final_output.outputs],
+        )
 
     assert final_output is not None
     seq_group = final_output.seq_group
-    await send_prefilled_seq(seq_group)
-    prefilled_seqs[request_id] = seq_group
+    seq_group_data = await make_async(serialize_seq_group)(seq_group)
+    push_kv_cache(seq_group)  # This will start the push in the background
+    return JSONResponse(
+        {"seq_group": seq_group_data, "kv_server_info": kv_info}
+    )
 
-    # TODO: We may need to get the full text from decode worker and then return it to the client
-    return Response(status_code=200)
 
 async def run(config: uvicorn.Config):
-    global client_session
+    global client_session, engine, kv_info
+    engine.start_background_loop()
+    engine.set_prefill_worker()
+    kv_info = await call_kv_method(engine, "prefill_kv_init")
     client_session = aiohttp.ClientSession()
     server = uvicorn.Server(config=config)
     await server.serve()
@@ -140,16 +97,20 @@ if __name__ == "__main__":
     args = parser.parse_args()
     # engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args = AsyncEngineArgs(
-        model="01-ai/Yi-6B",
-        tensor_parallel_size=2,
+        model="gpt2",
+        tensor_parallel_size=4,
         enforce_eager=True,
         disable_custom_all_reduce=True,
         engine_use_ray=False,
+        worker_use_ray=True,
     )
+
+    os.environ["WORKER_MODULE"] = "worker"
+    os.environ["WORKER_CLASS"] = "WorkerSplitwise"
+
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.API_SERVER
     )
-    engine.set_prefill_worker()
 
     config = uvicorn.Config(
         app=app,
@@ -158,4 +119,5 @@ if __name__ == "__main__":
         log_level=args.log_level,
     )
 
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     asyncio.run(run(config))

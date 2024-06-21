@@ -1,104 +1,61 @@
 import argparse
-import json
-import ssl
-from typing import AsyncIterator, List, Dict
 import asyncio
+import os
+from typing import Dict
 
+import aiohttp
 import uvicorn
+import uvloop
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
+from test_stub import get_prefill_worker
+from utils import call_kv_method, deserialize_seq_group
 
-from vllm.outputs import RequestOutput
-from vllm.sequence import SequenceGroup, SequenceStatus
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine, AsyncStream
-from vllm.sampling_params import SamplingParams
+from vllm.sequence import SequenceGroup, SequenceStatus
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import random_uuid, make_async
-import pickle
-import base64
-import aiohttp
-
-
-class PrefillWorker:
-    def __init__(
-        self, prefill_addr: str, prefill_port: int, kv_addr: str, kv_port: int
-    ):
-        self.prefill_addr = prefill_addr
-        self.prefill_port = prefill_port
-        self.kv_addr = kv_addr
-        self.kv_port = kv_port
-        # TODO: create ucx connection
-
-    async def send_results(self, final_output: RequestOutput):
-        prompt = final_output.prompt
-        text_outputs = [prompt + output.text for output in final_output.outputs]
-        ret = {"text": text_outputs}
-        # TODO: should sent this to somewhere
-
-    async def start_kv_cahce_comm(
-        self, prefilled_seq: SequenceGroup, dst_block_ids: List[int]
-    ):
-        """Start KV cache transfer on TP workers
-        1. Notify the prefill worker to start sending blocks
-        2. Let TP workers start to listen for blocks
-        """
-        request_id = prefilled_seq.request_id
-        url = f"http://{self.prefill_addr}:{self.prefill_port}/kv_cache"
-        async with client_session.post(
-            url, json={"request_id": request_id}
-        ) as response:
-            assert response.ok
-        # TODO
-
+from vllm.utils import make_async, random_uuid
 
 # global states for this perfill worker
 engine = None
-prefill_workers: Dict[str, PrefillWorker] = {}
 app = FastAPI()
-client_session: aiohttp.ClientSession
+http_session: aiohttp.ClientSession
 
 
-prefill_workers["127.0.0.1"] = PrefillWorker(
-    "127.0.0.1", 8001, "127.0.0.1", 8101
-)
+class PrefillWorker:
+    def __init__(self, prefill_addr: str, prefill_port: int):
+        self.prefill_addr = prefill_addr
+        self.prefill_port = prefill_port
+
+    async def send_prefill_request(
+        self, http_session: aiohttp.ClientSession, request, request_id
+    ):
+        prefill_request = {
+            "request_id": request_id,
+            **request,
+        }
+        url = f"http://{self.prefill_addr}:{self.prefill_port}/prefill"
+        async with http_session.post(url, json=prefill_request) as response:
+            response.raise_for_status()
+            data = await response.json()
+            return data
 
 
-async def start_listen_for_blocks(block_ids: List[int]):
-    pass
-
-
-async def pull_kv_cache(
-    prefilled_seq: SequenceGroup, prefill_worker: PrefillWorker
-):
+async def pull_kv_cache(prefilled_seq: SequenceGroup, kv_server_info: Dict):
+    request_id = prefilled_seq.request_id
     block_manager = engine.engine.scheduler.block_manager
     # we assume there is only one seq in the sequence group (prompt)
     seq = prefilled_seq.get_seqs()[0]
     dst_block_ids = block_manager.get_block_table(seq)
     # TODO: We should check if the number of blocks are the same
-    await prefill_worker.start_kv_cahce_comm(prefilled_seq, dst_block_ids)
+    await call_kv_method(
+        engine, "pull_kv", request_id, dst_block_ids, kv_server_info
+    )
 
 
-def deserialize_seq_group(data: str) -> SequenceGroup:
-    data = base64.b64decode(data)
-    return pickle.loads(data)
-
-
-async def generate(
-    stream: AsyncIterator[RequestOutput], prefill_worker: PrefillWorker
-):
-    async for request_output in stream:
-        final_output = request_output
-    assert final_output is not None
-    await prefill_worker.send_results(final_output)
-
-
-@app.post("/decode")
-async def decode(request: Request) -> Response:
+async def decode(prefilled_seq: SequenceGroup, kv_server_info: Dict):
     """Receive prefilled results from prefill workers."""
-    data = await request.json()
-    prefilled_seq = await make_async(deserialize_seq_group)(data["seq_group"])
-    prefill_worker = prefill_workers[request.client.host]
     request_id = prefilled_seq.request_id
     # allocate blocks
     for seq in prefilled_seq.get_seqs():
@@ -106,19 +63,46 @@ async def decode(request: Request) -> Response:
         seq.status = SequenceStatus.WAITING
     engine.engine.scheduler.block_manager.mark_blocks_as_computed(prefilled_seq)
     engine.engine.scheduler._allocate_and_set_running(prefilled_seq)
-    await pull_kv_cache(prefilled_seq, prefill_worker)
-    # resume the prefill process
+    await pull_kv_cache(prefilled_seq, kv_server_info)
+    # resume the inference process
     stream = AsyncStream(request_id)
     engine._request_tracker._request_streams[request_id] = stream
     engine.engine.scheduler.waiting.append(prefilled_seq)
-    asyncio.get_running_loop().create_task(generate(stream, prefill_worker))
-    return Response(status_code=200)
+    final_output = None
+    async for request_output in stream:
+        final_output = request_output
+    assert final_output is not None
+    prompt = final_output.prompt
+    return [prompt + output.text for output in final_output.outputs]
+
+
+@app.post("/generate")
+async def generate(request: Request) -> Response:
+    """Generate completion for the request.
+
+    The request should be a JSON object with the following fields:
+    - prompt: the prompt to use for the generation.
+    - other fields: the sampling parameters (See `SamplingParams` for details).
+    """
+    request_dict = await request.json()
+    request_id = random_uuid()
+    assert "request_id" not in request_dict, "The request contains request ID"
+    addr, host = get_prefill_worker()
+    comm = PrefillWorker(addr, host)
+    data = await comm.send_prefill_request(
+        http_session, request_dict, request_id
+    )
+    prefilled_seq = await make_async(deserialize_seq_group)(data["seq_group"])
+    kv_server_info = data["kv_server_info"]
+    text = await decode(prefilled_seq, kv_server_info)
+    return JSONResponse({"text": text})
 
 
 async def run(config: uvicorn.Config):
-    global client_session
+    global http_session, engine
     engine.start_background_loop()
-    client_session = aiohttp.ClientSession()
+    await call_kv_method(engine, "decode_kv_init")
+    http_session = aiohttp.ClientSession()
     server = uvicorn.Server(config=config)
     await server.serve()
 
@@ -132,16 +116,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
     # engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args = AsyncEngineArgs(
-        model="01-ai/Yi-6B",
-        tensor_parallel_size=2,
+        model="gpt2",
+        tensor_parallel_size=4,
         enforce_eager=True,
         disable_custom_all_reduce=True,
         engine_use_ray=False,
     )
+    os.environ["WORKER_MODULE"] = "worker"
+    os.environ["WORKER_CLASS"] = "WorkerSplitwise"
+
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.API_SERVER
     )
-    engine.set_decode_worker()
 
     config = uvicorn.Config(
         app=app,
@@ -149,5 +135,5 @@ if __name__ == "__main__":
         port=args.port,
         log_level=args.log_level,
     )
-
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     asyncio.run(run(config))
