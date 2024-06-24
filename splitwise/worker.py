@@ -116,7 +116,7 @@ class WorkerSplitwise(Worker):
         This function is blocking until the blocks are sent.
         """
         with self.lock:  # Mark these blocks are ready
-            event = asyncio.Event()
+            event = asyncio.Event(loop=self.loop)
             self.pending_requests[request_id] = (block_ids, event)
 
         async def _coro():
@@ -151,5 +151,5 @@ class WorkerSplitwise(Worker):
             asyncio.set_event_loop(loop)
             loop.run_until_complete(self._kv_server(port))
 
-        host = self.setup_kv_comm(run, port)
+        host = self.setup_kv_comm(run, self.port)
         return {"device": self.local_rank, "host": host, "port": port}
