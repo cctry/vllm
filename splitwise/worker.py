@@ -98,7 +98,7 @@ class WorkerSplitwise(Worker):
         """Wait for the kv cache to be pulled.
         This function is blocking and will wait until the kv cache is pulled.
         """
-        info = filter(lambda info: info['device'] == self.device, kv_server_info)
+        info = next(info for info in kv_server_info if info['device'] == self.device)
         host = info['host']
         port = info['port']
         future = asyncio.run_coroutine_threadsafe(
