@@ -98,14 +98,14 @@ class WorkerSplitwise(Worker):
         """Wait for the kv cache to be pulled.
         This function is blocking and will wait until the kv cache is pulled.
         """
-        info = next(info for info in kv_server_info if info['device'] == self.device)
+        info = next(info for info in kv_server_info if info['device'] == self.local_rank)
         host = info['host']
         port = info['port']
         future = asyncio.run_coroutine_threadsafe(
             self._kv_pull(host, port, request_id, block_ids), self.loop
         )
         try:
-            future.result(timeout=10)
+            future.result(timeout=3600)
         except concurrent.futures.TimeoutError:
             print(f"Blocks of request {request_id} took too long to receive")
         except Exception as e:
