@@ -117,7 +117,7 @@ if __name__ == "__main__":
     # engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args = AsyncEngineArgs(
         model="gpt2",
-        tensor_parallel_size=4,
+        tensor_parallel_size=2,
         enforce_eager=True,
         disable_custom_all_reduce=True,
         engine_use_ray=False,

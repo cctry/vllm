@@ -107,7 +107,6 @@ def set_NIC(device_id):
         options={
             "NET_DEVICES": f"{rdma_nic}:1",
             "TLS": "rc,sm,cuda_copy,cuda_ipc",
-            "IB_GPU_DIRECT_RDMA": "y",
         }
     )
     host = ucp.get_address(ifname=eth_nic)
