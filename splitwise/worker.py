@@ -124,7 +124,7 @@ class WorkerSplitwise(Worker):
 
         future = asyncio.run_coroutine_threadsafe(_coro(), self.loop)
         try:
-            future.result(timeout=10)
+            future.result(timeout=3600)
         except concurrent.futures.TimeoutError:
             print(f"Blocks of request {request_id} took too long to send")
         except Exception as e:

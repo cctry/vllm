@@ -25,22 +25,19 @@ client_session: aiohttp.ClientSession
 background_tasks: Set[asyncio.Task] = set()
 
 
-def free_seq(seq_group: SequenceGroup):
+def free_blocks(blocks):
     block_manager = engine.engine.scheduler.block_manager
-    block_tables = block_manager.block_tables
-    for seq in seq_group.get_seqs():
-        block_table = block_tables[seq.seq_id]
-        block_manager._free_block_table(block_table)
+    block_manager._free_block_table(blocks)
 
 
-def push_kv_cache(seq_group: SequenceGroup, block_ids: List[int]):
-    request_id = seq_group.request_id
+def push_kv_cache(request_id: str, blocks):
+    block_ids = [block.block_number for block in blocks]
     task = asyncio.create_task(
         call_kv_method(engine, "push_kv", request_id, block_ids)
     )
     background_tasks.add(task)
     task.add_done_callback(
-        make_done_callback(background_tasks, lambda _: free_seq(seq_group))
+        make_done_callback(background_tasks, free_blocks, blocks)
     )
 
 
@@ -74,9 +71,9 @@ async def prefill(request: Request) -> Response:
 
     assert final_output is not None
     seq_group = final_output.seq_group
-    block_ids = final_output.block_ids
+    blocks = final_output.blocks
     # This will start the push in the background
-    push_kv_cache(seq_group, block_ids)
+    push_kv_cache(request_id, blocks)
     seq_group_data = await make_async(serialize_seq_group)(seq_group)
     return JSONResponse(
         {"seq_group": seq_group_data, "kv_server_info": kv_info}

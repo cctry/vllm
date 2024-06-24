@@ -511,7 +511,7 @@ class AsyncLLMEngine:
             block_manager = scheduler.block_manager
 
             for request_output in request_outputs:
-                block_ids = []
+                blocks = []
                 seq_groups = [s for s in scheduler.running if s.request_id == request_output.request_id]
                 assert len(seq_groups) == 1, "Found multiple seq_groups for the same request_id"
                 # increase the block ref count to prevent them from being freed.
@@ -520,12 +520,12 @@ class AsyncLLMEngine:
                     block_table = block_manager.block_tables[seq.seq_id]
                     for block in set(block_table):
                         block.ref_count += 1
-                        # csy: Add block_number here because the sequence will
+                        # csy: Add blocks here because the sequence will
                         # later be removed in background
-                        block_ids.append(block.block_number)
+                        blocks.append(block)
                 # append needed states to request_output
                 request_output.seq_group = seq_groups[0]
-                request_output.block_ids = block_ids
+                request_output.blocks = blocks
                 # stop this request from being processed again
                 request_output.finished = True
 
