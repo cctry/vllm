@@ -2,14 +2,14 @@ import argparse
 import asyncio
 import os
 import time
-from typing import Set
+from typing import List, Set
 
 import aiohttp
 import uvicorn
 import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from utils import call_kv_method, serialize_seq_group, make_done_callback
+from utils import call_kv_method, make_done_callback, serialize_seq_group
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -18,7 +18,6 @@ from vllm.sequence import SequenceGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import make_async
 
-
 # global states for this perfill worker
 engine = None
 app = FastAPI()
@@ -26,18 +25,22 @@ client_session: aiohttp.ClientSession
 background_tasks: Set[asyncio.Task] = set()
 
 
-def push_kv_cache(seq_group: SequenceGroup):
+def free_seq(seq_group: SequenceGroup):
     block_manager = engine.engine.scheduler.block_manager
-    # we assume there is only one seq in the sequence group (prompt)
-    seq = seq_group.get_seqs()[0]
-    block_ids = block_manager.get_block_table(seq)
+    block_tables = block_manager.block_tables
+    for seq in seq_group.get_seqs():
+        block_table = block_tables[seq.seq_id]
+        block_manager._free_block_table(block_table)
+
+
+def push_kv_cache(seq_group: SequenceGroup, block_ids: List[int]):
     request_id = seq_group.request_id
     task = asyncio.create_task(
         call_kv_method(engine, "push_kv", request_id, block_ids)
     )
     background_tasks.add(task)
     task.add_done_callback(
-        make_done_callback(background_tasks, lambda _: block_manager.free(seq))
+        make_done_callback(background_tasks, lambda _: free_seq(seq_group))
     )
 
 
@@ -71,8 +74,10 @@ async def prefill(request: Request) -> Response:
 
     assert final_output is not None
     seq_group = final_output.seq_group
+    block_ids = final_output.block_ids
+    # This will start the push in the background
+    push_kv_cache(seq_group, block_ids)
     seq_group_data = await make_async(serialize_seq_group)(seq_group)
-    push_kv_cache(seq_group)  # This will start the push in the background
     return JSONResponse(
         {"seq_group": seq_group_data, "kv_server_info": kv_info}
     )
@@ -82,7 +87,7 @@ async def run(config: uvicorn.Config):
     global client_session, engine, kv_info
     engine.start_background_loop()
     engine.set_prefill_worker()
-    kv_info = await call_kv_method(engine, "prefill_kv_init")
+    kv_info = await call_kv_method(engine, "prefill_kv_init", 13337)
     client_session = aiohttp.ClientSession()
     server = uvicorn.Server(config=config)
     await server.serve()
@@ -98,7 +103,7 @@ if __name__ == "__main__":
     # engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args = AsyncEngineArgs(
         model="gpt2",
-        tensor_parallel_size=4,
+        tensor_parallel_size=2,
         enforce_eager=True,
         disable_custom_all_reduce=True,
         engine_use_ray=False,
