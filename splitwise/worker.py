@@ -152,4 +152,4 @@ class WorkerSplitwise(Worker):
             loop.run_until_complete(self._kv_server(port))
 
         host = self.setup_kv_comm(run, self.port)
-        return {"device": self.local_rank, "host": host, "port": port}
+        return {"device": self.local_rank, "host": host, "port": self.port}
