@@ -67,7 +67,8 @@ async def decode(prefilled_seq: SequenceGroup, kv_server_info: Dict):
     # resume the inference process
     stream = AsyncStream(request_id)
     engine._request_tracker._request_streams[request_id] = stream
-    engine.engine.scheduler.waiting.append(prefilled_seq)
+    engine.engine.scheduler.running.append(prefilled_seq)
+    engine._request_tracker.new_requests_event.set()
     final_output = None
     async for request_output in stream:
         final_output = request_output
