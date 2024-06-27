@@ -31,7 +31,7 @@ class WorkerSplitwise(Worker):
     def setup_kv_comm(self, kv_comm_func, *args, **kwargs):
         self.pending_requests: Dict[str, Tuple[List[int], asyncio.Event]] = {}
         self.lock = threading.Lock()
-        self.loop = uvloop.new_event_loop()
+        self.loop = asyncio.new_event_loop()
         assert self.local_rank == self.gpu_cache[0].device.index
         host = utils.set_NIC(self.local_rank)
         self.kv_thread = threading.Thread(
@@ -74,6 +74,7 @@ class WorkerSplitwise(Worker):
         ]
         await asyncio.gather(*coros)
         event.set()  # Mark these blocks are sent
+        await ep.close()
 
     async def _kv_server(self, port):
         lf = ucp.create_listener(self._kv_server_handler, port)
@@ -91,6 +92,7 @@ class WorkerSplitwise(Worker):
             for block, tag in zip(blocks, tags)
         ]
         await asyncio.gather(*coros)
+        await ep.close()
 
     def pull_kv(
         self, request_id: str, block_ids: List[int], kv_server_info: Dict

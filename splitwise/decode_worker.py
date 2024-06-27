@@ -5,7 +5,6 @@ from typing import Dict
 
 import aiohttp
 import uvicorn
-import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from test_stub import get_prefill_worker
@@ -121,7 +120,7 @@ if __name__ == "__main__":
         tensor_parallel_size=2,
         enforce_eager=True,
         disable_custom_all_reduce=True,
-        engine_use_ray=False,
+        engine_use_ray=False, # Must be False so we can access the scheduler
     )
     os.environ["WORKER_MODULE"] = "worker"
     os.environ["WORKER_CLASS"] = "WorkerSplitwise"
@@ -136,5 +135,4 @@ if __name__ == "__main__":
         port=args.port,
         log_level=args.log_level,
     )
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     asyncio.run(run(config))
