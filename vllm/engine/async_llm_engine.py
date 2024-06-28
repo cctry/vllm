@@ -555,7 +555,7 @@ class AsyncLLMEngine:
             # (eg. NCCL timeouts).
             try:
                 has_requests_in_progress = await asyncio.wait_for(
-                    self.engine_step(), 3600)
+                    self.engine_step(), ENGINE_ITERATION_TIMEOUT_S)
             except asyncio.TimeoutError as exc:
                 logger.error(
                     "Engine iteration timed out. This should never happen!")
