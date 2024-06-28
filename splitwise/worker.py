@@ -107,7 +107,7 @@ class WorkerSplitwise(Worker):
             self._kv_pull(host, port, request_id, block_ids), self.loop
         )
         try:
-            future.result(timeout=3600)
+            future.result(timeout=10)
         except concurrent.futures.TimeoutError:
             print(f"Blocks of request {request_id} took too long to receive")
         except Exception as e:
@@ -126,7 +126,7 @@ class WorkerSplitwise(Worker):
 
         future = asyncio.run_coroutine_threadsafe(_coro(), self.loop)
         try:
-            future.result(timeout=3600)
+            future.result(timeout=10)
         except concurrent.futures.TimeoutError:
             print(f"Blocks of request {request_id} took too long to send")
         except Exception as e:
