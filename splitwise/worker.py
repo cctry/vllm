@@ -10,6 +10,7 @@ import utils
 
 from vllm.worker.worker import Worker
 
+KV_TIMEOUT = 30
 
 class WorkerSplitwise(Worker):
     def setup_kv_comm(self, kv_comm_func, *args, **kwargs):
@@ -65,9 +66,9 @@ class WorkerSplitwise(Worker):
         await ep.close()
 
     async def _kv_server(self, port):
-        lf = ucp.create_listener(self._kv_server_handler, port)
-        while not lf.closed():
-            await asyncio.sleep(0.1)
+        self.lf = ucp.create_listener(self._kv_server_handler, port)
+        while not self.lf.closed():
+            await asyncio.sleep(1)
 
     async def _kv_pull(self, host, port, request_id, block_ids):
         # TODO: We can reuse this endpoint
@@ -95,7 +96,7 @@ class WorkerSplitwise(Worker):
             self._kv_pull(host, port, request_id, block_ids), self.loop
         )
         try:
-            future.result(timeout=10)
+            future.result(timeout=KV_TIMEOUT)
         except concurrent.futures.TimeoutError:
             print(f"Blocks of request {request_id} took too long to receive")
         except Exception as e:
@@ -114,7 +115,7 @@ class WorkerSplitwise(Worker):
 
         future = asyncio.run_coroutine_threadsafe(_coro(), self.loop)
         try:
-            future.result(timeout=10)
+            future.result(timeout=KV_TIMEOUT)
         except concurrent.futures.TimeoutError:
             print(f"Blocks of request {request_id} took too long to send")
         except Exception as e:
@@ -139,7 +140,11 @@ class WorkerSplitwise(Worker):
 
         def run(loop, port):
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(self._kv_server(port))
+            try:
+                loop.run_until_complete(self._kv_server(port))
+            except Exception as e:
+                print(e)
+                self.lf.close()
 
         host = self.setup_kv_comm(run, self.port)
         return {"device": self.local_rank, "host": host, "port": self.port}
