@@ -51,10 +51,12 @@ class WorkerSplitwise(Worker):
         return blocks, tags
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
-        request_id = utils.get_empty_uuid_tensor("cuda")
+        device = self.gpu_cache[0].device
+        request_id = utils.get_empty_uuid_tensor(device)
         await ep.recv(request_id)
         request_id = utils.tensor_to_uuid(request_id)
         async with utils.async_lock(self.lock):
+            assert request_id in self.pending_requests, f"Request {request_id} not found"
             block_ids, event = self.pending_requests.pop(request_id, None)
         blocks, tags = self.get_kv_blocks(block_ids)
         coros = [
@@ -71,9 +73,10 @@ class WorkerSplitwise(Worker):
             await asyncio.sleep(1)
 
     async def _kv_pull(self, host, port, request_id, block_ids):
+        device = self.gpu_cache[0].device
         # TODO: We can reuse this endpoint
         ep = await ucp.create_endpoint(host, port)
-        id_tensor = utils.uuid_to_tensor(request_id, "cuda")
+        id_tensor = utils.uuid_to_tensor(request_id, device)
         await ep.send(id_tensor)
         blocks, tags = self.get_kv_blocks(block_ids)
         coros = [

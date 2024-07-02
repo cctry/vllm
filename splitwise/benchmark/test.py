@@ -24,7 +24,6 @@ def benchmark(url, payload, qps, num_request):
         while True:
             task = task_queue.get()
             if task is None:
-                print("Consumer finished")
                 break
             url, payload = task
             try:

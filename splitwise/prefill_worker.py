@@ -61,11 +61,6 @@ async def prefill(request: Request) -> Response:
         if engine.is_prefill_worker:
             assert final_output is None, "Only one output is expected"
         final_output = request_output
-        print(
-            "Complete at",
-            time.time(),
-            [output.text for output in final_output.outputs],
-        )
 
     assert final_output is not None
     seq_group = final_output.seq_group
