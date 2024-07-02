@@ -2,32 +2,16 @@ import asyncio
 import concurrent
 import os
 import threading
-import time
 from typing import Dict, List, Tuple
 
 import torch
 import ucp
 import utils
-import uvloop
 
 from vllm.worker.worker import Worker
 
 
 class WorkerSplitwise(Worker):
-    def test(self):
-        pid = os.getpid()
-        tid = threading.current_thread().ident
-        vllm_local_rank = self.local_rank
-        vllm_device = self.device
-        torch_device = torch.cuda.current_device()
-        ddp_rank = torch.distributed.get_rank()
-        tensor_device = self.gpu_cache[0].device.index
-        print(
-            f"pid {pid} tid {tid} vllm_local_rank {vllm_local_rank} vllm_device {vllm_device} torch_device {torch_device} ddp_rank {ddp_rank} tensor_device {tensor_device}",
-            flush=True,
-        )
-        return pid, tid, vllm_local_rank, vllm_device, torch_device, ddp_rank
-
     def setup_kv_comm(self, kv_comm_func, *args, **kwargs):
         self.pending_requests: Dict[str, Tuple[List[int], asyncio.Event]] = {}
         self.lock = threading.Lock()
@@ -59,7 +43,11 @@ class WorkerSplitwise(Worker):
             for cache in self.gpu_cache
         ]
         v_tags = [f"v:{i}" for i in range(len(v_blocks))]
-        return k_blocks + v_blocks, k_tags + v_tags
+        blocks  = k_blocks + v_blocks
+        tags = k_tags + v_tags
+        if self.gpu_cache[0].dtype == torch.bfloat16:
+            blocks = [block.view(torch.float16) for block in blocks]
+        return blocks, tags
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
         request_id = utils.get_empty_uuid_tensor("cuda")
