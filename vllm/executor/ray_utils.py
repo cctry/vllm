@@ -1,4 +1,5 @@
 import pickle
+import os
 from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
@@ -74,13 +75,20 @@ def initialize_ray_cluster(
             "Ray is not installed. Please install Ray to use multi-node "
             "serving.")
 
+    # csy: Python cannot get the correct CPU count when running in a container.
+    # https://bugs.python.org/issue36054
+    num_cpus = os.getenv("RAY_NUM_CPUS", None)
+    if num_cpus is not None:
+        num_cpus = int(num_cpus)
     # Connect to a ray cluster.
     if is_hip():
         ray.init(address=ray_address,
                  ignore_reinit_error=True,
-                 num_gpus=parallel_config.world_size)
+                 num_gpus=parallel_config.world_size,
+                 num_cpus=num_cpus)
     else:
-        ray.init(address=ray_address, ignore_reinit_error=True)
+        ray.init(address=ray_address, ignore_reinit_error=True,
+                 num_cpus=num_cpus)
 
     if parallel_config.placement_group:
         # Placement group is already set.
