@@ -108,7 +108,7 @@ def set_NIC(device_id):
             "NET_DEVICES": f"{rdma_nic}:1",
             "TLS": "ib,cuda",
         },
-        blocking_progress_mode=True
+        blocking_progress_mode=True,
     )
     host = ucp.get_address(ifname=eth_nic)
     return host
@@ -135,3 +135,27 @@ def make_done_callback(
         call_back(*args, **kwargs)
 
     return _wrapper
+
+
+def wrap_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Wrap a tensor with a view when their dtype is not compatible."""
+    supported = [
+        torch.complex64,
+        torch.complex128,
+        torch.float16,
+        torch.float32,
+        torch.float64,
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    ]
+    if tensor.dtype not in supported:
+        new_dtype = next(
+            dtype
+            for dtype in supported
+            if tensor.dtype.itemsize == dtype.itemsize
+        )
+        return tensor.view(new_dtype)
+    return tensor

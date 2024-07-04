@@ -1,11 +1,7 @@
-import asyncio
-import concurrent
-import os
-import threading
 from typing import Dict, List, Tuple
 
 import torch
-import ucp
+import time
 import utils
 
 from vllm.worker.worker import Worker
@@ -21,21 +17,16 @@ class WorkerSplitwise(Worker):
     ) -> Tuple[List[torch.Tensor], List[str]]:
         """This function returns a list of block metadata for CUDA IPC."""
         k_blocks = [
-            cache[0, block_id, ...]
+            utils.wrap_tensor(cache[0, block_id, ...])
             for block_id in block_ids
             for cache in self.gpu_cache
         ]
         v_blocks = [
-            cache[1, block_id, ...]
+            utils.wrap_tensor(cache[1, block_id, ...])
             for block_id in block_ids
             for cache in self.gpu_cache
         ]
         blocks = k_blocks + v_blocks
-        # torch's array interface does not support bfloat16.
-        # We may need similar fix for other types like fp8
-        if blocks[0].dtype == torch.bfloat16:
-            blocks = [block.view(torch.float16) for block in blocks]
-
         tensor_data = [mp.reductions.reduce_tensor(block) for block in blocks]
         return tensor_data
 
@@ -43,6 +34,8 @@ class WorkerSplitwise(Worker):
         """Initialize the KV cache communicator as the decode worker"""
         cache = self.gpu_cache[0]
         assert self.local_rank == cache.device.index
+        self._manager = mp.Manager()
+        self.recv_flags = self._manager.dict()
         self.requests_queue = mp.Queue()
         self.kv_comm = KVComm(
             cache.device,
@@ -50,6 +43,7 @@ class WorkerSplitwise(Worker):
             cache.shape[2:],
             "client",
             self.requests_queue,
+            recv_flags=self.recv_flags,
         )
         self.kv_comm.start()
 
@@ -65,7 +59,7 @@ class WorkerSplitwise(Worker):
             cache.shape[2:],
             "server",
             self.requests_queue,
-            self.port,
+            server_port=self.port,
         )
         self.kv_comm.start()
         host = utils.set_NIC(self.local_rank)
@@ -80,16 +74,21 @@ class WorkerSplitwise(Worker):
         info = next(
             info for info in kv_server_info if info["device"] == self.local_rank
         )
-        tensor_data = self.get_kv_blocks_data(block_ids)        
-        event = mp.Event()
-        self.requests_queue.put((
-            request_id,
-            info["host"],
-            info["port"],
-            tensor_data,
-            event,
-        ))
-        event.wait(KV_TIMEOUT)
+        tensor_data = self.get_kv_blocks_data(block_ids)
+        self.recv_flags[request_id] = False
+        self.requests_queue.put(
+            (
+                request_id,
+                info["host"],
+                info["port"],
+                tensor_data,
+            )
+        )
+        start = time.time()
+        while not self.recv_flags[request_id]:
+            if time.time() - start > KV_TIMEOUT:
+                raise TimeoutError("KV cache pull timeout")
+            time.sleep(0.1)
 
     def push_kv(self, request_id: str, block_ids: List[int]):
         """Push the kv cache to the decode worker
@@ -97,4 +96,3 @@ class WorkerSplitwise(Worker):
         """
         tensor_data = self.get_kv_blocks_data(block_ids)
         self.requests_queue.put((request_id, tensor_data))
-        

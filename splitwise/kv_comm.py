@@ -15,6 +15,7 @@ class KVComm(mp.Process):
         role: str,
         requests_queue: mp.Queue,
         server_port=None,
+        recv_flags=None,
     ):
         super().__init__()
         self.role = role
@@ -23,8 +24,9 @@ class KVComm(mp.Process):
         self.block_shape = block_shape
         self.requests_queue = requests_queue
         self.server_port = server_port
-        assert self.role in ["server", "client"]
+        self.recv_flags = recv_flags
         assert role == "client" or server_port is not None
+        assert role == "server" or recv_flags is not None
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
         id_tensor = utils.get_empty_uuid_tensor(self.device)
@@ -50,13 +52,16 @@ class KVComm(mp.Process):
             while not self.lf.closed():
                 if not self.requests_queue.empty():
                     request_id, tensor_data = self.requests_queue.get()
+                    print(f"Ready to send KV for {request_id}")
                     self.pending_requests[request_id] = tensor_data
                 await asyncio.sleep(0)
 
         asyncio.run(_kv_server())
 
-    async def _kv_pull(self, host, port, request_id, tensor_data, event):
+    async def _kv_pull(self, host, port, request_id, tensor_data):
+        print(f"Trying to pull KV for {request_id} from {host}:{port}")
         ep = await ucp.create_endpoint(host, port)
+        print(f"Connected to {host}:{port}")
         id_tensor = utils.uuid_to_tensor(request_id, self.device)
         await ep.send(id_tensor)
         buffer = self.get_buffer()
@@ -64,34 +69,37 @@ class KVComm(mp.Process):
         for block in blocks:
             await ep.recv(buffer)
             block.copy_(buffer)
-        event.set()
+        self.recv_flags[request_id] = True
         await ep.close()    
     
     def kv_client(self):
         async def _kv_client():
             tasks = set()
             while True:
-                request_id, host, port, tensor_data, event = (
-                    self.requests_queue.get()
-                )
-                task = asyncio.create_task(
-                    self._kv_pull(host, port, request_id, tensor_data, event)
-                )
-                tasks.add(task)
-                task.add_done_callback(tasks.remove)
+                if not self.requests_queue.empty():
+                    request_id, host, port, tensor_data = (
+                        self.requests_queue.get(True)
+                    )
+                    print(f"Ready to receive KV for {request_id}")
+                    task = asyncio.create_task(
+                        self._kv_pull(host, port, request_id, tensor_data)
+                    )
+                    tasks.add(task)
+                    task.add_done_callback(tasks.remove)
+                await asyncio.sleep(0)
 
         asyncio.run(_kv_client())
 
     def get_buffer(self) -> torch.Tensor:
         # TODO: We can use double buffer here
-        return torch.empty(
+        buffer = torch.empty(
             self.block_shape, device=self.device, dtype=self.dtype
         )
+        return utils.wrap_tensor(buffer)
 
-    method_map = {"server": kv_server, "client": kv_client}
 
     def run(self):
         torch.cuda.init()
         utils.set_NIC(self.device.index)
-
-        self.method_map[self.role]()
+        method_map = {"server": self.kv_server, "client": self.kv_client}
+        method_map[self.role]()
