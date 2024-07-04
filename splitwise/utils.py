@@ -34,14 +34,14 @@ UCX_MIN_SIZE = 8192
 
 def uuid_to_tensor(uuid: str, device="cpu") -> torch.Tensor:
     assert len(uuid) == 32
-    intlist = [int(uuid[i : i + 2], 16) for i in range(0, len(uuid), 2)]
+    intlist = [ord(c) for c in uuid]
     # pad this to 8KB
     intlist += [0] * (UCX_MIN_SIZE - len(intlist))
     return torch.tensor(intlist, dtype=torch.uint8, device=device)
 
 
 def tensor_to_uuid(tensor: torch.Tensor) -> str:
-    return "".join([f"{x:02x}" for x in tensor[:16].cpu().numpy()])
+    return "".join(chr(x) for x in tensor[:32].cpu().numpy())
 
 
 def get_empty_uuid_tensor(device="cpu") -> torch.Tensor:
@@ -106,8 +106,9 @@ def set_NIC(device_id):
     ucp.init(
         options={
             "NET_DEVICES": f"{rdma_nic}:1",
-            "TLS": "rc,sm,cuda_copy,cuda_ipc",
-        }
+            "TLS": "ib,cuda",
+        },
+        blocking_progress_mode=True
     )
     host = ucp.get_address(ifname=eth_nic)
     return host

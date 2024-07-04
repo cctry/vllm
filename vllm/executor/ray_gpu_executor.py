@@ -105,7 +105,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 num_cpus=0,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
-                concurrency_groups={"kv": 4},
+                concurrency_groups={"kv": 16},
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(
                 worker_module_name=worker_module_name,
