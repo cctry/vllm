@@ -24,6 +24,7 @@ if __name__ == "__main__":
     input_ids = inputs["input_ids"][0]
     
     prompt_id = input_ids[:args.prompt_length]
+    print(len(input_ids))
     
     prompt = tokenizer.decode(prompt_id)
     
