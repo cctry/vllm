@@ -32,6 +32,7 @@ class WorkerSplitwise(Worker):
 
     def decode_kv_init(self):
         """Initialize the KV cache communicator as the decode worker"""
+        mp.set_start_method("spawn")
         cache = self.gpu_cache[0]
         assert self.local_rank == cache.device.index
         self._manager = mp.Manager()
@@ -49,6 +50,7 @@ class WorkerSplitwise(Worker):
 
     def prefill_kv_init(self, port: int):
         """Initialize the KV cache communicator as the prefill worker"""
+        mp.set_start_method("spawn")
         cache = self.gpu_cache[0]
         assert self.local_rank == cache.device.index
         self.requests_queue = mp.Queue()
@@ -62,7 +64,7 @@ class WorkerSplitwise(Worker):
             server_port=self.port,
         )
         self.kv_comm.start()
-        host = utils.set_NIC(self.local_rank)
+        host = utils.set_NIC(self.local_rank, False)
         return {"device": self.local_rank, "host": host, "port": self.port}
 
     def pull_kv(

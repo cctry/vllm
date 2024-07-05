@@ -101,15 +101,16 @@ def detect_NIC(device_id):
     return list(interfaces.items())[device_id % 2]
 
 
-def set_NIC(device_id):
+def set_NIC(device_id, init_ucx=True):
     rdma_nic, eth_nic = detect_NIC(device_id)
-    ucp.init(
-        options={
-            "NET_DEVICES": f"{rdma_nic}:1",
-            "TLS": "ib,cuda",
-        },
-        blocking_progress_mode=True,
-    )
+    if init_ucx:
+        ucp.init(
+            options={
+                "NET_DEVICES": f"{rdma_nic}:1",
+                "TLS": "ib,cuda",
+            },
+            blocking_progress_mode=True,
+        )
     host = ucp.get_address(ifname=eth_nic)
     return host
 
