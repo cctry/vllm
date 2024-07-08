@@ -14,6 +14,10 @@ import ucp
 from vllm.sequence import SequenceGroup
 from vllm.utils import make_async
 
+def chunk(lst, chunk_size):
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
+
 
 def hash(*args):
     return zlib.adler32(repr(args).encode("utf-8"))
