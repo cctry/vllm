@@ -5,6 +5,14 @@ import torch.multiprocessing as mp
 import ucp
 import utils
 
+import time
+from contextlib import contextmanager
+@contextmanager
+def timer(request_id, job_desc):
+    start = time.time()
+    yield
+    elapsed = time.time() - start
+    print(f"[timer] {request_id}: {job_desc}: {elapsed}")
 
 class KVComm(mp.Process):
     def __init__(
@@ -33,15 +41,16 @@ class KVComm(mp.Process):
         buffer = self.get_buffer()
         await ep.recv(id_tensor)
         request_id = utils.tensor_to_uuid(id_tensor)
-        assert (
-            request_id in self.pending_requests
-        ), f"Request {request_id} not found"
+        with timer(request_id, "retrive ID"):
+            while request_id not in self.pending_requests:
+                await asyncio.sleep(0)
         tensor_data = self.pending_requests.pop(request_id)
         blocks = [data[0](*data[1]) for data in tensor_data]
         for block in blocks:
             buffer.copy_(block)
             await ep.send(buffer)
-        await ep.close()
+        with timer(request_id, "close"):
+            await ep.close()   
 
     def kv_server(self):
         async def _kv_server():
@@ -52,25 +61,26 @@ class KVComm(mp.Process):
             while not self.lf.closed():
                 if not self.requests_queue.empty():
                     request_id, tensor_data = self.requests_queue.get()
-                    print(f"Ready to send KV for {request_id}")
                     self.pending_requests[request_id] = tensor_data
                 await asyncio.sleep(0)
 
         asyncio.run(_kv_server())
 
     async def _kv_pull(self, host, port, request_id, tensor_data):
-        print(f"Trying to pull KV for {request_id} from {host}:{port}")
-        ep = await ucp.create_endpoint(host, port)
-        print(f"Connected to {host}:{port}")
-        id_tensor = utils.uuid_to_tensor(request_id, self.device)
-        await ep.send(id_tensor)
-        buffer = self.get_buffer()
-        blocks = [data[0](*data[1]) for data in tensor_data]
-        for block in blocks:
-            await ep.recv(buffer)
-            block.copy_(buffer)
-        self.recv_flags[request_id] = True
-        await ep.close()    
+        with timer(request_id, "pull kv"):
+            with timer(request_id, "connect"):
+                ep = await ucp.create_endpoint(host, port)
+            with timer(request_id, "exchange ID"):
+                id_tensor = utils.uuid_to_tensor(request_id, self.device)
+                await ep.send(id_tensor)
+            buffer = self.get_buffer()
+            blocks = [data[0](*data[1]) for data in tensor_data]
+            for block in blocks:
+                await ep.recv(buffer)
+                block.copy_(buffer)
+            self.recv_flags[request_id] = True
+            with timer(request_id, "close"):
+                await ep.close()    
     
     def kv_client(self):
         async def _kv_client():
@@ -80,7 +90,6 @@ class KVComm(mp.Process):
                     request_id, host, port, tensor_data = (
                         self.requests_queue.get(True)
                     )
-                    print(f"Ready to receive KV for {request_id}")
                     task = asyncio.create_task(
                         self._kv_pull(host, port, request_id, tensor_data)
                     )
