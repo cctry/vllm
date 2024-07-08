@@ -12,6 +12,13 @@ KV_TIMEOUT = 30
 
 
 class WorkerSplitwise(Worker):
+    def setup(self):
+        mp.set_start_method("spawn")
+        cache = self.gpu_cache[0]
+        assert self.local_rank == cache.device.index
+        cache_shape = (len(self.gpu_cache),) + tuple(cache.shape)
+        return cache_shape, cache.dtype, cache.device
+
     def get_kv_blocks_data(
         self, block_ids: List[int]
     ) -> Tuple[List[torch.Tensor], List[str]]:
@@ -32,16 +39,14 @@ class WorkerSplitwise(Worker):
 
     def decode_kv_init(self):
         """Initialize the KV cache communicator as the decode worker"""
-        mp.set_start_method("spawn")
-        cache = self.gpu_cache[0]
-        assert self.local_rank == cache.device.index
+        shape, dtype, device = self.setup()
         self._manager = mp.Manager()
         self.recv_flags = self._manager.dict()
         self.requests_queue = mp.Queue()
         self.kv_comm = KVComm(
-            cache.device,
-            cache.dtype,
-            cache.shape[2:],
+            device,
+            dtype,
+            shape,
             "client",
             self.requests_queue,
             recv_flags=self.recv_flags,
@@ -50,15 +55,13 @@ class WorkerSplitwise(Worker):
 
     def prefill_kv_init(self, port: int):
         """Initialize the KV cache communicator as the prefill worker"""
-        mp.set_start_method("spawn")
-        cache = self.gpu_cache[0]
-        assert self.local_rank == cache.device.index
+        shape, dtype, device = self.setup()
         self.requests_queue = mp.Queue()
         self.port = port + self.local_rank
         self.kv_comm = KVComm(
-            cache.device,
-            cache.dtype,
-            cache.shape[2:],
+            device,
+            dtype,
+            shape,
             "server",
             self.requests_queue,
             server_port=self.port,

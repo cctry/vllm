@@ -5,13 +5,15 @@ import torch.multiprocessing as mp
 import ucp
 import utils
 
+import block_copy
+
 
 class KVComm(mp.Process):
     def __init__(
         self,
         device: torch.device,
         dtype: torch.dtype,
-        block_shape: tuple,
+        shape: tuple,
         role: str,
         requests_queue: mp.Queue,
         server_port=None,
@@ -21,12 +23,18 @@ class KVComm(mp.Process):
         self.role = role
         self.device = device
         self.dtype = dtype
-        self.block_shape = block_shape
         self.requests_queue = requests_queue
         self.server_port = server_port
         self.recv_flags = recv_flags
         assert role == "client" or server_port is not None
         assert role == "server" or recv_flags is not None
+        assert len(shape) == 6
+        self.block_shape = shape[3:]
+        self.num_packing_blocks = shape[0] * shape[1]
+        block_size = shape[3] * shape[4] * shape[5] * dtype.itemsize // 16
+        self.block_copy = block_copy.get_block_copy(
+            self.num_packing_blocks, block_size
+        )
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
         id_tensor = utils.get_empty_uuid_tensor(self.device)
@@ -37,10 +45,10 @@ class KVComm(mp.Process):
             request_id in self.pending_requests
         ), f"Request {request_id} not found"
         tensor_data = self.pending_requests.pop(request_id)
-        blocks = [data[0](*data[1]) for data in tensor_data]
-        for block_pair in zip(blocks[::2], blocks[1::2]):
-            buffer[0].copy_(block_pair[0])
-            buffer[1].copy_(block_pair[1])
+        blocks = [func(*args) for (func, args) in tensor_data]
+        assert len(blocks) % self.num_packing_blocks == 0
+        for blks in utils.chunk(blocks, self.num_packing_blocks):
+            self.block_copy.gather(buffer, blks)
             await ep.send(buffer)
         await ep.close()
 
@@ -66,14 +74,14 @@ class KVComm(mp.Process):
         id_tensor = utils.uuid_to_tensor(request_id, self.device)
         await ep.send(id_tensor)
         buffer = self.get_buffer()
-        blocks = [data[0](*data[1]) for data in tensor_data]
-        for block_pair in zip(blocks[::2], blocks[1::2]):
+        blocks = [func(*args) for (func, args) in tensor_data]
+        assert len(blocks) % self.num_packing_blocks == 0
+        for blks in utils.chunk(blocks, self.num_packing_blocks):
             await ep.recv(buffer)
-            block_pair[0].copy(buffer[0])
-            block_pair[1].copy(buffer[1])
+            self.block_copy.scatter(blks, buffer)
         self.recv_flags[request_id] = True
-        await ep.close()    
-    
+        await ep.close()
+
     def kv_client(self):
         async def _kv_client():
             tasks = set()
@@ -95,10 +103,11 @@ class KVComm(mp.Process):
     def get_buffer(self) -> torch.Tensor:
         # TODO: We can use double buffer here
         buffer = torch.empty(
-            (2, *self.block_shape), device=self.device, dtype=self.dtype
+            (self.num_packing_blocks, *self.block_shape),
+            device=self.device,
+            dtype=self.dtype,
         )
         return utils.wrap_tensor(buffer)
-
 
     def run(self):
         torch.cuda.init()
