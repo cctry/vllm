@@ -121,6 +121,7 @@ if __name__ == "__main__":
         enforce_eager=True,
         disable_custom_all_reduce=True,
         engine_use_ray=False, # Must be False so we can access the scheduler
+        block_size=64,
     )
     os.environ["RAY_NUM_CPUS"] = "64"
     os.environ["WORKER_MODULE"] = "worker"
