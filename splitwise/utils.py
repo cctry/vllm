@@ -14,6 +14,37 @@ import ucp
 from vllm.sequence import SequenceGroup
 from vllm.utils import make_async
 
+from contextlib import contextmanager
+import time
+
+
+class Recorder:
+    def __init__(self, desc):
+        self.desc = desc
+        self.tagged_time = {}
+    @contextmanager
+    def record(self, tag):
+        start = time.time()
+        yield
+        end = time.time()
+        if tag not in self.tagged_time:
+            self.tagged_time[tag] = end - start
+        else:
+            self.tagged_time[tag] += end - start
+
+    def show(self):
+        for tag, t in self.tagged_time.items():
+            print(f"{self.desc}:{tag} {t}")
+
+@contextmanager
+def timer(desc):
+    t = Recorder(desc)
+    start = time.time()
+    yield t
+    end = time.time()
+    print(f"{desc}: {end - start}")
+    t.show()
+
 def chunk(lst, chunk_size):
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]

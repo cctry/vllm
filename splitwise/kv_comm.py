@@ -19,7 +19,7 @@ class KVComm(mp.Process):
         server_port=None,
         recv_flags=None,
     ):
-        super().__init__()
+        super().__init__(name=f"KVComm:{device.index}")
         self.role = role
         self.device = device
         self.dtype = dtype
@@ -29,28 +29,30 @@ class KVComm(mp.Process):
         assert role == "client" or server_port is not None
         assert role == "server" or recv_flags is not None
         assert len(shape) == 6
+        self.cache_shape = shape
         self.block_shape = shape[3:]
         self.num_packing_blocks = shape[0] * shape[1]
-        block_size = shape[3] * shape[4] * shape[5] * dtype.itemsize // 16
-        self.block_copy = block_copy.get_block_copy(
-            self.num_packing_blocks, block_size
-        )
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
         id_tensor = utils.get_empty_uuid_tensor(self.device)
-        buffer = self.get_buffer()
         await ep.recv(id_tensor)
         request_id = utils.tensor_to_uuid(id_tensor)
-        assert (
-            request_id in self.pending_requests
-        ), f"Request {request_id} not found"
-        tensor_data = self.pending_requests.pop(request_id)
-        blocks = [func(*args) for (func, args) in tensor_data]
-        assert len(blocks) % self.num_packing_blocks == 0
-        for blks in utils.chunk(blocks, self.num_packing_blocks):
-            self.block_copy.gather(buffer, blks)
-            await ep.send(buffer)
-        await ep.close()
+        with utils.timer(f"[{request_id}] push KV") as t:
+            with t.record("wait for engine ready"):
+                while request_id not in self.pending_requests:
+                    await asyncio.sleep(0)
+            tensor_data = self.pending_requests.pop(request_id)
+            blocks = [func(*args) for (func, args) in tensor_data]
+            buffer = self.get_buffer()
+            assert len(blocks) % self.num_packing_blocks == 0
+            for blks in utils.chunk(blocks, self.num_packing_blocks):
+                with t.record("copy"):
+                    for i, b in enumerate(blks):
+                        buffer[i].copy_(b, non_blocking=True)
+                # self.block_copy.gather(buffer, blks)
+                with t.record("send"):
+                    await ep.send(buffer)
+            await ep.close()
 
     def kv_server(self):
         async def _kv_server():
@@ -61,26 +63,30 @@ class KVComm(mp.Process):
             while not self.lf.closed():
                 if not self.requests_queue.empty():
                     request_id, tensor_data = self.requests_queue.get()
-                    print(f"Ready to send KV for {request_id}")
                     self.pending_requests[request_id] = tensor_data
                 await asyncio.sleep(0)
 
         asyncio.run(_kv_server())
 
     async def _kv_pull(self, host, port, request_id, tensor_data):
-        print(f"Trying to pull KV for {request_id} from {host}:{port}")
-        ep = await ucp.create_endpoint(host, port)
-        print(f"Connected to {host}:{port}")
-        id_tensor = utils.uuid_to_tensor(request_id, self.device)
-        await ep.send(id_tensor)
-        buffer = self.get_buffer()
-        blocks = [func(*args) for (func, args) in tensor_data]
-        assert len(blocks) % self.num_packing_blocks == 0
-        for blks in utils.chunk(blocks, self.num_packing_blocks):
-            await ep.recv(buffer)
-            self.block_copy.scatter(blks, buffer)
-        self.recv_flags[request_id] = True
-        await ep.close()
+        with utils.timer(f"[{request_id}] pull from {host}:{port}") as t:
+            with t.record("connect"):
+                ep = await ucp.create_endpoint(host, port)
+            with t.record("id"):
+                id_tensor = utils.uuid_to_tensor(request_id, self.device)
+                await ep.send(id_tensor)
+            buffer = self.get_buffer()
+            blocks = [func(*args) for (func, args) in tensor_data]
+            assert len(blocks) % self.num_packing_blocks == 0
+            for blks in utils.chunk(blocks, self.num_packing_blocks):
+                with t.record("recv"):
+                    await ep.recv(buffer)
+                with t.record("copy"):
+                    for i, b in enumerate(blks):
+                        b.copy_(buffer[i])
+                    # self.block_copy.scatter(blks, buffer)
+            self.recv_flags[request_id] = True
+            await ep.close()
 
     def kv_client(self):
         async def _kv_client():
@@ -90,7 +96,6 @@ class KVComm(mp.Process):
                     request_id, host, port, tensor_data = (
                         self.requests_queue.get(True)
                     )
-                    print(f"Ready to receive KV for {request_id}")
                     task = asyncio.create_task(
                         self._kv_pull(host, port, request_id, tensor_data)
                     )
@@ -111,6 +116,16 @@ class KVComm(mp.Process):
 
     def run(self):
         torch.cuda.init()
+        # block_size = (
+        #     self.cache_shape[3]
+        #     * self.cache_shape[4]
+        #     * self.cache_shape[5]
+        #     * self.dtype.itemsize
+        #     // 16
+        # )
+        # self.block_copy = block_copy.get_block_copy(
+        #     self.num_packing_blocks, block_size
+        # )
         utils.set_NIC(self.device.index)
         method_map = {"server": self.kv_server, "client": self.kv_client}
         method_map[self.role]()
