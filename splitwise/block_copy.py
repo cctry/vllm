@@ -6,7 +6,7 @@ cuda_arch = f"{torch.cuda.get_device_capability(0)[0]}.{torch.cuda.get_device_ca
 os.environ["TORCH_CUDA_ARCH_LIST"] = cuda_arch
 
 
-def get_block_copy(num_block, block_size, num_thd=128):
+def get_block_copy(num_block, block_size, num_thd=32):
     cuda = f"""
 #include <ATen/cuda/CUDAContext.h>
 constexpr int num_ptr = {num_block};
@@ -20,8 +20,6 @@ struct ptr_arr {{
 __global__ void 
 __launch_bounds__(num_thd)
 gather_kernel(float4* __restrict__ dst, const ptr_arr src) {{
-    __builtin_assume(block_size > 0);
-    __builtin_assume(block_size % num_thd == 0);
     int blk_id = blockIdx.x;
     auto src_ptr = src.ptrs[blk_id];
     auto dst_ptr = &dst[blk_id * block_size];
@@ -35,8 +33,6 @@ gather_kernel(float4* __restrict__ dst, const ptr_arr src) {{
 __global__ void 
 __launch_bounds__(num_thd)
 scatter_kernel(ptr_arr dst, const float4* __restrict__ src) {{
-    __builtin_assume(block_size > 0);
-    __builtin_assume(block_size % num_thd == 0);
     int blk_id = blockIdx.x;
     auto src_ptr = &src[blk_id * block_size];
     auto dst_ptr = dst.ptrs[blk_id];
@@ -48,6 +44,8 @@ scatter_kernel(ptr_arr dst, const float4* __restrict__ src) {{
 }}
 
 void gather(at::Tensor& dst, std::vector<at::Tensor> src) {{
+    auto device = dst.device()
+    at::cuda::CUDAGuard device_guard(device);
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::BFloat16, at::ScalarType::Half, dst.type(), "gather", ([&] {{
         ptr_arr src_ptrs;
         auto dst_ptr = (float4*)dst.data_ptr<scalar_t>();
@@ -61,6 +59,8 @@ void gather(at::Tensor& dst, std::vector<at::Tensor> src) {{
 }}
 
 void scatter(std::vector<at::Tensor> dst, at::Tensor& src) {{
+    auto device = src.device()
+    at::cuda::CUDAGuard device_guard(device);
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::BFloat16, at::ScalarType::Half, src.type(), "scatter", ([&] {{
         ptr_arr dst_ptrs;
         auto src_ptr = (float4*)src.data_ptr<scalar_t>();
@@ -74,11 +74,11 @@ void scatter(std::vector<at::Tensor> dst, at::Tensor& src) {{
 }}
     """
     cpp = """
-        void gather(at::Tensor& dst, std::vector<at::Tensor> src);
-        void scatter(std::vector<at::Tensor> dst, at::Tensor& src);
+void gather(at::Tensor& dst, std::vector<at::Tensor> src);
+void scatter(std::vector<at::Tensor> dst, at::Tensor& src);
         """
     return load_inline(
-        "block_copy",
+        f"block_copy_{num_block}_{block_size}_{num_thd}",
         cpp_sources=[cpp],
         cuda_sources=[cuda],
         functions=["gather", "scatter"],

@@ -29,6 +29,7 @@ class KVComm(mp.Process):
         assert role == "client" or server_port is not None
         assert role == "server" or recv_flags is not None
         assert len(shape) == 6
+        assert shape[0] == 2
         self.cache_shape = shape
         self.block_shape = shape[3:]
         self.num_packing_blocks = shape[0] * shape[1]
@@ -47,9 +48,9 @@ class KVComm(mp.Process):
             assert len(blocks) % self.num_packing_blocks == 0
             for blks in utils.chunk(blocks, self.num_packing_blocks):
                 with t.record("copy"):
-                    for i, b in enumerate(blks):
-                        buffer[i].copy_(b, non_blocking=True)
-                # self.block_copy.gather(buffer, blks)
+                    # for i, b in enumerate(blks):
+                    #     buffer[i].copy_(b, non_blocking=True)
+                    self.block_copy.gather(buffer, blks)
                 with t.record("send"):
                     await ep.send(buffer)
             await ep.close()
@@ -82,9 +83,9 @@ class KVComm(mp.Process):
                 with t.record("recv"):
                     await ep.recv(buffer)
                 with t.record("copy"):
-                    for i, b in enumerate(blks):
-                        b.copy_(buffer[i])
-                    # self.block_copy.scatter(blks, buffer)
+                    # for i, b in enumerate(blks):
+                    #     b.copy_(buffer[i])
+                    self.block_copy.scatter(blks, buffer)
             self.recv_flags[request_id] = True
             await ep.close()
 
@@ -116,16 +117,16 @@ class KVComm(mp.Process):
 
     def run(self):
         torch.cuda.init()
-        # block_size = (
-        #     self.cache_shape[3]
-        #     * self.cache_shape[4]
-        #     * self.cache_shape[5]
-        #     * self.dtype.itemsize
-        #     // 16
-        # )
-        # self.block_copy = block_copy.get_block_copy(
-        #     self.num_packing_blocks, block_size
-        # )
+        block_size = (
+            self.cache_shape[3]
+            * self.cache_shape[4]
+            * self.cache_shape[5]
+            * self.dtype.itemsize
+            // 16
+        )
+        self.block_copy = block_copy.get_block_copy(
+            self.num_packing_blocks, block_size
+        )
         utils.set_NIC(self.device.index)
         method_map = {"server": self.kv_server, "client": self.kv_client}
         method_map[self.role]()
