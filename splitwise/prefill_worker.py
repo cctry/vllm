@@ -88,12 +88,12 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--log-level", type=str, default="debug")
-    parser.add_argument("--model", type=str, default="/data/mistral-7b-instruct-v0_2")
+    parser.add_argument("--model-path", type=str, default="/data/mistral-7b-instruct-v0_2")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     # engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args = AsyncEngineArgs(
-        model=args.model,
+        model=args.model_path,
         tensor_parallel_size=2,
         enforce_eager=True,
         disable_custom_all_reduce=True,

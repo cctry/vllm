@@ -29,7 +29,7 @@ class KVComm(mp.Process):
         assert role == "client" or server_port is not None
         assert role == "server" or recv_flags is not None
         assert len(shape) == 6
-        assert shape[0] == 2
+        assert shape[1] == 2
         self.cache_shape = shape
         self.block_shape = shape[3:]
         self.num_packing_blocks = shape[0] * shape[1]

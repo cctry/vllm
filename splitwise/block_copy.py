@@ -9,6 +9,7 @@ os.environ["TORCH_CUDA_ARCH_LIST"] = cuda_arch
 def get_block_copy(num_block, block_size, num_thd=32):
     cuda = f"""
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 constexpr int num_ptr = {num_block};
 constexpr int block_size = {block_size};
 constexpr int num_thd = {num_thd};
@@ -44,7 +45,7 @@ scatter_kernel(ptr_arr dst, const float4* __restrict__ src) {{
 }}
 
 void gather(at::Tensor& dst, std::vector<at::Tensor> src) {{
-    auto device = dst.device()
+    auto device = dst.device();
     at::cuda::CUDAGuard device_guard(device);
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::BFloat16, at::ScalarType::Half, dst.type(), "gather", ([&] {{
         ptr_arr src_ptrs;
@@ -59,7 +60,7 @@ void gather(at::Tensor& dst, std::vector<at::Tensor> src) {{
 }}
 
 void scatter(std::vector<at::Tensor> dst, at::Tensor& src) {{
-    auto device = src.device()
+    auto device = src.device();
     at::cuda::CUDAGuard device_guard(device);
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::BFloat16, at::ScalarType::Half, src.type(), "scatter", ([&] {{
         ptr_arr dst_ptrs;
