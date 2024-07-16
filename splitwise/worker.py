@@ -81,6 +81,7 @@ class WorkerSplitwise(Worker):
         )
         tensor_data = self.get_kv_blocks_data(block_ids)
         self.recv_flags[request_id] = False
+        print(f"Waiting for pulling {request_id}")
         self.requests_queue.put(
             (
                 request_id,
@@ -92,8 +93,9 @@ class WorkerSplitwise(Worker):
         start = time.time()
         while not self.recv_flags[request_id]:
             if time.time() - start > KV_TIMEOUT:
-                raise TimeoutError("KV cache pull timeout")
+                raise TimeoutError(f"KV cache pull for {request_id} timeout")
             time.sleep(0.1)
+        print(f"Finish for pulling {request_id}")
 
     def push_kv(self, request_id: str, block_ids: List[int]):
         """Push the kv cache to the decode worker

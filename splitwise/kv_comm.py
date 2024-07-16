@@ -32,12 +32,13 @@ class KVComm(mp.Process):
         assert shape[1] == 2
         self.cache_shape = shape
         self.block_shape = shape[3:]
-        self.num_packing_blocks = shape[0] * shape[1]
+        self.num_packing_blocks = shape[0] * shape[1] * 2
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
         id_tensor = utils.get_empty_uuid_tensor(self.device)
         await ep.recv(id_tensor)
         request_id = utils.tensor_to_uuid(id_tensor)
+        print(f"Receive pull request for {request_id}")
         with utils.timer(f"[{request_id}] push KV") as t:
             with t.record("wait for engine ready"):
                 while request_id not in self.pending_requests:
@@ -45,11 +46,10 @@ class KVComm(mp.Process):
             tensor_data = self.pending_requests.pop(request_id)
             blocks = [func(*args) for (func, args) in tensor_data]
             buffer = self.get_buffer()
-            assert len(blocks) % self.num_packing_blocks == 0
+            assert len(blocks) > self.num_packing_blocks
+            print(f"Sending blocks for {request_id}")
             for blks in utils.chunk(blocks, self.num_packing_blocks):
                 with t.record("copy"):
-                    # for i, b in enumerate(blks):
-                    #     buffer[i].copy_(b, non_blocking=True)
                     self.block_copy.gather(buffer, blks)
                 with t.record("send"):
                     await ep.send(buffer)
@@ -73,18 +73,19 @@ class KVComm(mp.Process):
         with utils.timer(f"[{request_id}] pull from {host}:{port}") as t:
             with t.record("connect"):
                 ep = await ucp.create_endpoint(host, port)
+                print(f"Connected to {host}:{port} for {request_id}")
             with t.record("id"):
                 id_tensor = utils.uuid_to_tensor(request_id, self.device)
                 await ep.send(id_tensor)
+                print(f"Send request_id {request_id}")
             buffer = self.get_buffer()
             blocks = [func(*args) for (func, args) in tensor_data]
-            assert len(blocks) % self.num_packing_blocks == 0
+            assert len(blocks) > self.num_packing_blocks
+            print(f"Waiting blocks for {request_id}")
             for blks in utils.chunk(blocks, self.num_packing_blocks):
                 with t.record("recv"):
                     await ep.recv(buffer)
                 with t.record("copy"):
-                    # for i, b in enumerate(blks):
-                    #     b.copy_(buffer[i])
                     self.block_copy.scatter(blks, buffer)
             self.recv_flags[request_id] = True
             await ep.close()
