@@ -142,7 +142,7 @@ def set_NIC(device_id, init_ucx=True):
         ucp.init(
             options={
                 "NET_DEVICES": f"{rdma_nic}:1",
-                "TLS": "ib,cuda",
+                "TLS": "rc_mlx5,cuda",
             },
             blocking_progress_mode=True,
         )

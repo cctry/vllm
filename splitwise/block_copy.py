@@ -50,12 +50,12 @@ void gather(at::Tensor& dst, std::vector<at::Tensor> src) {{
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::BFloat16, at::ScalarType::Half, dst.type(), "gather", ([&] {{
         ptr_arr src_ptrs;
         auto dst_ptr = (float4*)dst.data_ptr<scalar_t>();
-        for (int i=0; i< num_ptr; i++) {{
+        for (int i=0; i < src.size(); i++) {{
             src_ptrs.ptrs[i] = (float4*)src[i].data_ptr<scalar_t>();
         }}
         static_assert(block_size % num_thd == 0);
         static_assert(block_size % 16 == 0);
-        gather_kernel<<<num_ptr, num_thd, 0, at::cuda::getCurrentCUDAStream()>>>(dst_ptr, src_ptrs);
+        gather_kernel<<<src.size(), num_thd, 0, at::cuda::getCurrentCUDAStream()>>>(dst_ptr, src_ptrs);
     }}));
 }}
 
@@ -65,12 +65,12 @@ void scatter(std::vector<at::Tensor> dst, at::Tensor& src) {{
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::BFloat16, at::ScalarType::Half, src.type(), "scatter", ([&] {{
         ptr_arr dst_ptrs;
         auto src_ptr = (float4*)src.data_ptr<scalar_t>();
-        for (int i=0; i< num_ptr; i++) {{
+        for (int i=0; i < dst.size(); i++) {{
             dst_ptrs.ptrs[i] = (float4*)dst[i].data_ptr<scalar_t>();
         }}
         static_assert(block_size % num_thd == 0);
         static_assert(block_size % 16 == 0);
-        scatter_kernel<<<num_ptr, num_thd, 0, at::cuda::getCurrentCUDAStream()>>>(dst_ptrs, src_ptr);
+        scatter_kernel<<<dst.size(), num_thd, 0, at::cuda::getCurrentCUDAStream()>>>(dst_ptrs, src_ptr);
     }}));
 }}
     """
