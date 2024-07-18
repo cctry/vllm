@@ -509,25 +509,38 @@ class AsyncLLMEngine:
         if self.is_prefill_worker:
             scheduler = self.engine.scheduler
             block_manager = scheduler.block_manager
+            block_size = block_manager.block_size
 
             for request_output in request_outputs:
-                blocks = []
                 seq_groups = [s for s in scheduler.running if s.request_id == request_output.request_id]
                 assert len(seq_groups) == 1, "Found multiple seq_groups for the same request_id"
-                # increase the block ref count to prevent them from being freed.
-                for seq in seq_groups[0].get_seqs():
-                    block_manager.access_all_blocks_in_seq(seq, time.time())
-                    block_table = block_manager.block_tables[seq.seq_id]
-                    for block in set(block_table):
-                        block.ref_count += 1
-                        # csy: Add blocks here because the sequence will
-                        # later be removed in background
-                        blocks.append(block)
+                seq_group = seq_groups[0]
+                assert len(seq_group.get_seqs()) == 1, "Should be only one prompt sequence"
+                seq = seq_group.get_seqs()[0]
+
+                if not hasattr(seq_group, "last_computed_token"):
+                    seq_group.last_computed_token = 0
+                last_block_to_fill = seq_group.last_computed_token // block_size
+                num_uncomputed_tokens = seq_group.get_num_uncomputed_tokens()
+                num_computed_tokens = seq.get_len() - num_uncomputed_tokens
+                seq_group.last_computed_token = num_computed_tokens
+                block_filled = num_computed_tokens // block_size
+                block_table = block_manager.block_tables[seq.seq_id]
+                ready_blocks = block_table[last_block_to_fill:block_filled]
+                if not seq_group.is_prefill():
+                    assert num_uncomputed_tokens == 1, "Only one uncomputed token is allowed"
+                    if num_computed_tokens % block_size != 0: # Last block is partially filled
+                        assert block_filled == len(block_table) - 1
+                        ready_blocks.append(block_table[-1])
+                for block in ready_blocks:
+                    block.ref_count += 1
                 # append needed states to request_output
-                request_output.seq_group = seq_groups[0]
-                request_output.blocks = blocks
-                # stop this request from being processed again
-                request_output.finished = True
+                request_output.seq_group = seq_group
+                # Add blocks here because the sequence will
+                # later be removed in background
+                request_output.blocks = ready_blocks
+                # stop this request from generation
+                request_output.finished = not seq_group.is_prefill()
 
 
         # Put the outputs into the corresponding streams.
