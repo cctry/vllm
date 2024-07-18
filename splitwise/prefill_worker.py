@@ -62,7 +62,7 @@ async def prefill(request: Request) -> Response:
         final_output = request_output
         seq_group = final_output.seq_group
         blocks = final_output.blocks
-        task = push_kv_cache(request_id, seq_group, blocks, kv_addr)
+        task = push_kv_cache(request_id, blocks, kv_addr)
         push_tasks.append(task)
     assert final_output is not None
     seq_group_data = await make_async(serialize_seq_group)(seq_group)

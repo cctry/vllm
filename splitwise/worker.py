@@ -82,10 +82,13 @@ class WorkerSplitwise(Worker):
 
     def push_kv(self, request_id: str, block_ids: List[int], kv_addr):
         """Push the kv cache to the decode worker"""
+        info = next(
+            info for info in kv_addr if info["device"] == self.local_rank
+        )
         tensor_data = self.get_kv_blocks_data(block_ids)
         self.flags[request_id] = False
         self.requests_queue.put(
-            (request_id, kv_addr["host"], kv_addr["port"], tensor_data)
+            (request_id, info["host"], info["port"], tensor_data)
         )
         start = time.time()
         while request_id not in self.flags:
@@ -98,7 +101,4 @@ class WorkerSplitwise(Worker):
         """Wait for the push_kv to finish.
         This function is non-blocking.
         """
-        self.requests_queue.put(
-            (request_id, None, None, None)
-        )
-
+        self.requests_queue.put((request_id, None, None, None))

@@ -7,11 +7,15 @@ os.environ["TORCH_CUDA_ARCH_LIST"] = cuda_arch
 
 
 def get_block_copy(num_block, block_size, num_thd=32):
+    """
+    num_block: number of blocks
+    block_size: size of each block in bytes
+    """
     cuda = f"""
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 constexpr int num_ptr = {num_block};
-constexpr int block_size = {block_size};
+constexpr int block_size = {block_size / 16};
 constexpr int num_thd = {num_thd};
 
 struct ptr_arr {{

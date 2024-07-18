@@ -32,7 +32,10 @@ class KVComm(mp.Process):
         assert shape[1] == 2
         self.cache_shape = shape
         self.block_shape = shape[3:]
-        self.num_packing_blocks = shape[0] * shape[1] * 2
+        self.block_size = shape[3] * shape[4] * shape[5] * dtype.itemsize
+        self.buffer_size = 1024*1024*4 # 4MB
+        self.num_packing_blocks = self.buffer_size // self.block_size
+        assert self.buffer_size % self.block_size == 0
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
         id_tensor = utils.get_empty_uuid_tensor(self.device)
@@ -72,7 +75,7 @@ class KVComm(mp.Process):
         while tensor_data := await tensor_queue.get():
             buffer = self.get_buffer()
             blocks = [func(*args) for (func, args) in tensor_data]
-            ep.flush()
+            await ep.flush()
             for blks in utils.chunk(blocks, self.num_packing_blocks):
                 self.block_copy.gather(blks, buffer)
                 await ep.send(buffer)
@@ -114,15 +117,8 @@ class KVComm(mp.Process):
 
     def run(self):
         torch.cuda.init()
-        block_size = (
-            self.cache_shape[3]
-            * self.cache_shape[4]
-            * self.cache_shape[5]
-            * self.dtype.itemsize
-            // 16
-        )
         self.block_copy = block_copy.get_block_copy(
-            self.num_packing_blocks, block_size
+            self.num_packing_blocks, self.block_size
         )
         utils.set_NIC(self.device.index)
         method_map = {"server": self.kv_server, "client": self.kv_client}

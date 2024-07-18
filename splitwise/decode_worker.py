@@ -11,14 +11,14 @@ from fastapi.responses import JSONResponse, Response
 from test_stub import get_prefill_worker
 from utils import call_kv_method, deserialize_seq_group
 
+from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.core.scheduler import Scheduler
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine, AsyncStream
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceGroup, SequenceStatus
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import make_async, random_uuid
-from vllm.core.interfaces import AllocStatus, BlockSpaceManager
-from vllm.core.scheduler import Scheduler
 
 # global states for this perfill worker
 engine: AsyncLLMEngine
@@ -40,14 +40,15 @@ class PrefillWorker:
     ):
         prefill_request = {
             "request_id": request_id,
-            kv_addr: kv_addr,
+            "kv_addr": kv_addr,
             **request,
         }
         url = f"http://{self.prefill_addr}:{self.prefill_port}/prefill"
         async with http_session.post(url, json=prefill_request) as response:
             response.raise_for_status()
             data = await response.json()
-            return make_async(deserialize_seq_group)(data["seq_group"])
+            return await make_async(deserialize_seq_group)(data["seq_group"])
+
 
 def resume_request(request_id: str, seq_group: SequenceGroup):
     scheduler.block_manager.mark_blocks_as_computed(seq_group)
@@ -69,7 +70,7 @@ async def create_seq_group(
         request_id=request_id, inputs=inputs
     )
     engine.engine._add_processed_request(
-        request_id, processed_inputs, params, arrival_time
+        request_id, processed_inputs, params, arrival_time, None
     )
     # remove it from the scheduler
     seq_group = scheduler.waiting.pop()
