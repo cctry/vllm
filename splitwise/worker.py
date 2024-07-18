@@ -41,6 +41,7 @@ class WorkerSplitwise(Worker):
     def decode_kv_init(self, port: int):
         """Initialize the KV cache communicator as the decode worker"""
         shape, dtype, device, host = self.setup()
+        self.port = port + self.local_rank
         self.kv_comm = KVComm(
             device,
             dtype,

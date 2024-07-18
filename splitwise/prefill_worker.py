@@ -91,12 +91,12 @@ if __name__ == "__main__":
     )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
-    engine_args = AsyncEngineArgs.from_cli_args(args)
     args.model = args.model_path
     args.enforce_eager = True
     args.disable_custom_all_reduce = True
     args.engine_use_ray = False
     args.worker_use_ray = True
+    engine_args = AsyncEngineArgs.from_cli_args(args)
 
     os.environ["RAY_NUM_CPUS"] = "64"
     os.environ["WORKER_MODULE"] = "worker"
