@@ -162,14 +162,13 @@ if __name__ == "__main__":
     parser.add_argument("--alloc-timeout", type=int, default=10)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    args.model = args.model_path
+    args.enforce_eager = True
+    args.disable_custom_all_reduce = True
+    args.engine_use_ray = False
+    args.worker_use_ray = True
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args = AsyncEngineArgs(
-        model=args.model_path,
-        tensor_parallel_size=2,
-        enforce_eager=True,
-        disable_custom_all_reduce=True,
-        engine_use_ray=False,  # Must be False so we can access the scheduler
-    )
+
     os.environ["RAY_NUM_CPUS"] = "64"
     os.environ["WORKER_MODULE"] = "worker"
     os.environ["WORKER_CLASS"] = "WorkerSplitwise"

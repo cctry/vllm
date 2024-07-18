@@ -5,7 +5,9 @@ import os
 import pickle
 import re
 import subprocess
+import time
 import zlib
+from contextlib import contextmanager
 from typing import Callable, Set
 
 import torch
@@ -14,14 +16,12 @@ import ucp
 from vllm.sequence import SequenceGroup
 from vllm.utils import make_async
 
-from contextlib import contextmanager
-import time
-
 
 class Recorder:
     def __init__(self, desc):
         self.desc = desc
         self.tagged_time = {}
+
     @contextmanager
     def record(self, tag):
         start = time.time()
@@ -36,6 +36,7 @@ class Recorder:
         for tag, t in self.tagged_time.items():
             print(f"{self.desc}:{tag} {t}")
 
+
 @contextmanager
 def timer(desc):
     t = Recorder(desc)
@@ -45,9 +46,10 @@ def timer(desc):
     print(f"{desc}: {end - start}")
     t.show()
 
+
 def chunk(lst, chunk_size):
     for i in range(0, len(lst), chunk_size):
-        yield lst[i:i + chunk_size]
+        yield lst[i : i + chunk_size]
 
 
 def hash(*args):
@@ -152,14 +154,18 @@ def set_NIC(device_id, init_ucx=True):
 
 async def call_kv_method(engine, method: str, *args, **kwargs):
     assert engine and engine.is_running, "Engine is not running"
-    workers = engine.engine.model_executor.workers
     driver = engine.engine.model_executor.driver_worker
-    coros = [make_async(driver.execute_kv_method)(method, *args, **kwargs)] + [
-        asyncio.wrap_future(
-            worker.execute_kv_method.remote(method, *args, **kwargs).future()
-        )
-        for worker in workers
-    ]
+    coros = [make_async(driver.execute_kv_method)(method, *args, **kwargs)]
+    if hasattr(engine.engine.model_executor, "workers"):
+        workers = engine.engine.model_executor.workers
+        coros += [
+            asyncio.wrap_future(
+                worker.execute_kv_method.remote(
+                    method, *args, **kwargs
+                ).future()
+            )
+            for worker in workers
+        ]
     return await asyncio.gather(*coros)
 
 
