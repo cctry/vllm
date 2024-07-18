@@ -1,11 +1,10 @@
 import asyncio
 
+import block_copy
 import torch
 import torch.multiprocessing as mp
 import ucp
 import utils
-
-import block_copy
 
 
 class KVComm(mp.Process):
@@ -16,7 +15,7 @@ class KVComm(mp.Process):
         shape: tuple,
         role: str,
         requests_queue: mp.Queue,
-        flags: dict, 
+        flags: dict,
         server_port=None,
     ):
         super().__init__(name=f"KVComm:{device.index}")
@@ -33,7 +32,7 @@ class KVComm(mp.Process):
         self.cache_shape = shape
         self.block_shape = shape[3:]
         self.block_size = shape[3] * shape[4] * shape[5] * dtype.itemsize
-        self.buffer_size = 1024*1024*4 # 4MB
+        self.buffer_size = 1024 * 1024 * 8  # 8MB
         self.num_packing_blocks = self.buffer_size // self.block_size
         assert self.buffer_size % self.block_size == 0
 
@@ -46,15 +45,18 @@ class KVComm(mp.Process):
         tensor_data = self.pending_requests.pop(request_id)
         blocks = [func(*args) for (func, args) in tensor_data]
         buffer = self.get_buffer()
+        print(f"ready to recv {request_id}")
         for blks in utils.chunk(blocks, self.num_packing_blocks):
             await ep.recv(buffer)
+            print(f"[{request_id}] recv {blks[0].data_ptr()}")
             self.block_copy.scatter(blks, buffer)
         self.flags[request_id] = True
         await ep.close()
+        print(f"[{request_id}] close")
 
     def kv_server(self):
-        """ The server will listen for KV blocks
-        """
+        """The server will listen for KV blocks"""
+
         async def _kv_server():
             self.pending_requests = {}
             self.lf = ucp.create_listener(
@@ -72,36 +74,43 @@ class KVComm(mp.Process):
         ep = await ucp.create_endpoint(host, port)
         id_tensor = utils.uuid_to_tensor(request_id, self.device)
         await ep.send(id_tensor)
-        while tensor_data := await tensor_queue.get():
+        print(f"ready to send {request_id}")
+        while True:
+            tensor_data, push_key = await tensor_queue.get()
+            if tensor_data is None:
+                break
             buffer = self.get_buffer()
             blocks = [func(*args) for (func, args) in tensor_data]
             await ep.flush()
             for blks in utils.chunk(blocks, self.num_packing_blocks):
-                self.block_copy.gather(blks, buffer)
+                self.block_copy.gather(buffer, blks)
                 await ep.send(buffer)
+                print(f"[{request_id}] send {blks[0].data_ptr()}")
+            self.flags[push_key] = True
         await ep.close()
+        print(f"[{request_id}] close")
 
     def kv_client(self):
-        """ The server will send KV blocks
-        """
+        """The server will send KV blocks"""
+
         async def _kv_client():
             tasks = {}
             while True:
                 if not self.requests_queue.empty():
-                    request_id, host, port, tensor_data = (
+                    request_id, host, port, tensor_data, push_key = (
                         self.requests_queue.get(True)
                     )
                     if request_id not in tasks:
                         queue = asyncio.Queue()
                         task = asyncio.create_task(
                             self._kv_push(host, port, request_id, queue),
-                            name = request_id,
+                            name=request_id,
                         )
                         tasks[request_id] = (task, queue)
                         task.add_done_callback(
                             lambda task: tasks.pop(task.get_name())
                         )
-                    tasks[request_id][1].put_nowait(tensor_data)
+                    tasks[request_id][1].put_nowait((tensor_data, push_key))
                 await asyncio.sleep(0)
 
         asyncio.run(_kv_client())

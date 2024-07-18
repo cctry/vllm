@@ -6,6 +6,7 @@ from typing import Dict, Set
 
 import aiohttp
 import uvicorn
+import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from test_stub import get_prefill_worker
@@ -183,4 +184,4 @@ if __name__ == "__main__":
         port=args.port,
         log_level=args.log_level,
     )
-    asyncio.run(run(config))
+    uvloop.run(run(config))

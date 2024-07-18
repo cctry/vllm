@@ -6,6 +6,7 @@ from typing import List, Set
 
 import aiohttp
 import uvicorn
+import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from utils import call_kv_method, serialize_seq_group
@@ -112,4 +113,4 @@ if __name__ == "__main__":
         port=args.port,
         log_level=args.log_level,
     )
-    asyncio.run(run(config))
+    uvloop.run(run(config))

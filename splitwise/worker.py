@@ -35,6 +35,7 @@ class WorkerSplitwise(Worker):
             for layer in self.gpu_cache:
                 blocks.append(layer[0, block_id, ...])
                 blocks.append(layer[1, block_id, ...])
+        blocks = [utils.wrap_tensor(block) for block in blocks]
         tensor_data = [mp.reductions.reduce_tensor(block) for block in blocks]
         return tensor_data
 
@@ -86,19 +87,20 @@ class WorkerSplitwise(Worker):
             info for info in kv_addr if info["device"] == self.local_rank
         )
         tensor_data = self.get_kv_blocks_data(block_ids)
-        self.flags[request_id] = False
+        push_key = f"{request_id}:{block_ids[0]}"
+        self.flags[push_key] = False
         self.requests_queue.put(
-            (request_id, info["host"], info["port"], tensor_data)
+            (request_id, info["host"], info["port"], tensor_data, push_key)
         )
         start = time.time()
-        while request_id not in self.flags:
+        while not self.flags[push_key]:
             if time.time() - start > KV_TIMEOUT:
                 raise TimeoutError(f"KV cache push for {request_id} timeout")
             time.sleep(0.1)
-        self.flags.pop(request_id)
+        self.flags.pop(push_key)
 
     def finish_push_kv(self, request_id: str):
         """Wait for the push_kv to finish.
         This function is non-blocking.
         """
-        self.requests_queue.put((request_id, None, None, None))
+        self.requests_queue.put((request_id, None, None, None, None))
