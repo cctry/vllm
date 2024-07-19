@@ -5,7 +5,7 @@ import torch
 import torch.multiprocessing as mp
 import ucp
 import utils
-
+import os
 
 class KVComm(mp.Process):
     def __init__(
@@ -37,22 +37,18 @@ class KVComm(mp.Process):
         assert self.buffer_size % self.block_size == 0
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
-        id_tensor = utils.get_empty_uuid_tensor(self.device)
-        await ep.recv(id_tensor)
-        request_id = utils.tensor_to_uuid(id_tensor)
+        id_buffer = await ep.am_recv()
+        request_id = id_buffer.decode("utf-8")
         while request_id not in self.pending_requests:
             await asyncio.sleep(0)
         tensor_data = self.pending_requests.pop(request_id)
         blocks = [func(*args) for (func, args) in tensor_data]
         buffer = self.get_buffer()
-        print(f"ready to recv {request_id}")
         for blks in utils.chunk(blocks, self.num_packing_blocks):
             await ep.recv(buffer)
-            print(f"[{request_id}] recv {blks[0].data_ptr()}")
             self.block_copy.scatter(blks, buffer)
         self.flags[request_id] = True
         await ep.close()
-        print(f"[{request_id}] close")
 
     def kv_server(self):
         """The server will listen for KV blocks"""
@@ -72,23 +68,19 @@ class KVComm(mp.Process):
 
     async def _kv_push(self, host, port, request_id, tensor_queue):
         ep = await ucp.create_endpoint(host, port)
-        id_tensor = utils.uuid_to_tensor(request_id, self.device)
-        await ep.send(id_tensor)
-        print(f"ready to send {request_id}")
+        id_buffer = bytearray(request_id, "utf-8")
+        await ep.am_send(id_buffer)
         while True:
             tensor_data, push_key = await tensor_queue.get()
             if tensor_data is None:
                 break
             buffer = self.get_buffer()
             blocks = [func(*args) for (func, args) in tensor_data]
-            await ep.flush()
             for blks in utils.chunk(blocks, self.num_packing_blocks):
                 self.block_copy.gather(buffer, blks)
                 await ep.send(buffer)
-                print(f"[{request_id}] send {blks[0].data_ptr()}")
             self.flags[push_key] = True
         await ep.close()
-        print(f"[{request_id}] close")
 
     def kv_client(self):
         """The server will send KV blocks"""

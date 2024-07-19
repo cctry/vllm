@@ -8,6 +8,7 @@ import subprocess
 import time
 import zlib
 from contextlib import contextmanager
+from functools import partial
 from typing import Callable, Set
 
 import torch
@@ -66,25 +67,6 @@ def serialize_seq_group(seq_group: SequenceGroup) -> str:
     return base64.b64encode(data).decode("utf-8")
 
 
-UCX_MIN_SIZE = 8192
-
-
-def uuid_to_tensor(uuid: str, device="cpu") -> torch.Tensor:
-    assert len(uuid) == 32
-    intlist = [ord(c) for c in uuid]
-    # pad this to 8KB
-    intlist += [0] * (UCX_MIN_SIZE - len(intlist))
-    return torch.tensor(intlist, dtype=torch.uint8, device=device)
-
-
-def tensor_to_uuid(tensor: torch.Tensor) -> str:
-    return "".join(chr(x) for x in tensor[:32].cpu().numpy())
-
-
-def get_empty_uuid_tensor(device="cpu") -> torch.Tensor:
-    return torch.zeros(UCX_MIN_SIZE, dtype=torch.uint8, device=device)
-
-
 @contextlib.asynccontextmanager
 async def async_lock(lock):
     loop = asyncio.get_event_loop()
@@ -137,6 +119,7 @@ def detect_NIC(device_id):
     assert len(interfaces) > 0, "No RDMA interfaces found"
     return list(interfaces.items())[device_id % 2]
 
+RNDV_THRESH = 8192
 
 def set_NIC(device_id, init_ucx=True):
     rdma_nic, eth_nic = detect_NIC(device_id)
@@ -145,9 +128,13 @@ def set_NIC(device_id, init_ucx=True):
             options={
                 "NET_DEVICES": f"{rdma_nic}:1",
                 "TLS": "rc_mlx5,cuda",
+                "RNDV_THRESH": str(RNDV_THRESH)
             },
             blocking_progress_mode=True,
         )
+        device = torch.device(f"cuda:{device_id}")
+        am_allocator = partial(torch.zeros, dtype=torch.uint8, device=device)
+        ucp.register_am_allocator(am_allocator, "cuda")
     host = ucp.get_address(ifname=eth_nic)
     return host
 

@@ -13,7 +13,7 @@ def benchmark(url, payload, qps, num_request):
     def producer():
         interval = 1.0 / qps
         for i in range(num_request):
-            task_queue.put((url, payload))
+            task_queue.put((i, url, payload))
             time.sleep(interval)
 
         # Signal the end of production
@@ -25,16 +25,16 @@ def benchmark(url, payload, qps, num_request):
             task = task_queue.get()
             if task is None:
                 break
-            url, payload = task
+            i, url, payload = task
             try:
                 response = requests.post(url, json=payload)
-                print(response.status_code, response.elapsed.total_seconds())
+                print(i, response.status_code, response.elapsed.total_seconds())
                 result_queue.put(
-                    (response.status_code, response.elapsed.total_seconds())
+                    (i, response.status_code, response.elapsed.total_seconds())
                 )
             except Exception as e:
                 print(e)
-                result_queue.put((None, None, str(e)))
+                result_queue.put((i, None, None, str(e)))
 
     with ThreadPoolExecutor() as executor:
         producer_thread = executor.submit(producer)

@@ -113,4 +113,4 @@ if __name__ == "__main__":
         port=args.port,
         log_level=args.log_level,
     )
-    uvloop.run(run(config))
+    asyncio.run(run(config))
