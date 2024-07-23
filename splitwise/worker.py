@@ -2,6 +2,7 @@ import time
 from itertools import accumulate
 from typing import Dict, List, Optional, Tuple
 
+import block_copy
 import torch
 import torch.multiprocessing as mp
 import utils
@@ -10,6 +11,7 @@ from kv_comm import KVComm
 from vllm.worker.worker import Worker
 
 KV_TIMEOUT = 30
+BUFFER_SIZE = 4 * 1024 * 1024  # 4MB
 
 
 class WorkerSplitwise(Worker):
@@ -17,13 +19,24 @@ class WorkerSplitwise(Worker):
         mp.set_start_method("spawn")
         cache = self.gpu_cache[0]
         assert self.local_rank == cache.device.index
-        cache_shape = (len(self.gpu_cache),) + tuple(cache.shape)
+        block_shape = tuple(cache.shape)[-3:]
         self._manager = mp.Manager()
         self.flags = self._manager.dict()
         self.requests_queue = mp.Queue()
         host = utils.set_NIC(self.local_rank, False)
         self.kv_addr = {}
-        return cache_shape, cache.dtype, cache.device, host
+        # compile the gather/scatter kernels
+        if self.is_driver_worker:
+            block_size = (
+                cache.shape[-1]
+                * cache.shape[-2]
+                * cache.shape[-3]
+                * cache.dtype.itemsize
+            )
+            num_packing_blocks = BUFFER_SIZE // block_size
+            assert BUFFER_SIZE % block_size == 0
+            block_copy.get_block_copy(num_packing_blocks, block_size)
+        return block_shape, cache.dtype, cache.device, host
 
     def get_kv_blocks_data(
         self,
@@ -56,6 +69,7 @@ class WorkerSplitwise(Worker):
             "server",
             self.requests_queue,
             self.flags,
+            BUFFER_SIZE,
             server_port=self.port,
         )
         self.kv_comm.start()
@@ -65,7 +79,13 @@ class WorkerSplitwise(Worker):
         """Initialize the KV cache communicator as the prefill worker"""
         shape, dtype, device, host = self.setup()
         self.kv_comm = KVComm(
-            device, dtype, shape, "client", self.requests_queue, self.flags
+            device,
+            dtype,
+            shape,
+            "client",
+            self.requests_queue,
+            self.flags,
+            BUFFER_SIZE,
         )
         self.kv_comm.start()
 

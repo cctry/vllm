@@ -8,7 +8,29 @@ import utils
 import os
 import struct
 
+
+def serialize_int_list(int_list):
+    byte_array = bytearray(len(int_list) * 4)
+    for i, number in enumerate(int_list):
+        struct.pack_into("i", byte_array, i * 4, number)
+    return byte_array
+
+
+def deserialize_bytearray(byte_array):
+    int_list = [
+        struct.unpack_from("i", byte_array, i * 4)[0]
+        for i in range(len(byte_array) // 4)
+    ]
+    return int_list
+
+
 def get_blk_seq(start, num, length):
+    lst = list(range(start, start + num)) + [-1] * (length - num)
+    return serialize_int_list(lst)
+
+def from_blk_seq(blk_seq):
+    lst = deserialize_bytearray(blk_seq)
+    return [x for x in lst if x != -1]
 
 
 class KVComm(mp.Process):
@@ -20,6 +42,7 @@ class KVComm(mp.Process):
         role: str,
         requests_queue: mp.Queue,
         flags: dict,
+        buffer_size: int,
         server_port=None,
     ):
         super().__init__(name=f"KVComm:{device.index}")
@@ -31,12 +54,9 @@ class KVComm(mp.Process):
         self.flags = flags
         assert role == "client" or server_port is not None
         assert role == "server" or flags is not None
-        assert len(shape) == 6
-        assert shape[1] == 2
-        self.cache_shape = shape
-        self.block_shape = shape[3:]
-        self.block_size = shape[3] * shape[4] * shape[5] * dtype.itemsize
-        self.buffer_size = 1024 * 1024 * 4  # 4 MB
+        self.block_shape = shape
+        self.block_size = shape[0] * shape[1] * shape[2] * dtype.itemsize
+        self.buffer_size = buffer_size
         self.num_packing_blocks = self.buffer_size // self.block_size
         assert self.buffer_size % self.block_size == 0
         assert self.num_packing_blocks != 0
@@ -48,10 +68,15 @@ class KVComm(mp.Process):
             await asyncio.sleep(0)
         tensor_data = self.pending_requests.pop(request_id)
         blocks = [func(*args) for (func, args) in tensor_data]
-        buffer = self.get_buffer()
-        for blks in utils.chunk(blocks, self.num_packing_blocks):
-            await ep.recv(buffer)
-            self.block_copy.scatter(blks, buffer)
+        remaining = len(blocks)
+        buffer = self.get_buffer() # This buffer may from Rust
+        while remaining > 0:
+            await ep.recv(buffer) # Buffer is written
+            blk_seq = await ep.am_recv() # Notified with the sent blocks
+            idx = from_blk_seq(blk_seq)
+            blks = [blocks[i] for i in idx] # Figure out the addresses
+            self.block_copy.scatter(blks, buffer) # Scatter
+            remaining -= len(blks)
         self.flags[request_id] = True
         await ep.close()
 
@@ -82,11 +107,12 @@ class KVComm(mp.Process):
                 break
             buffer = self.get_buffer()
             blocks = [func(*args) for (func, args) in tensor_data]
-            # FIXME: Each batch send will have the tail group is partial. We need to include the block seq number.
             for blks in utils.chunk(blocks, self.num_packing_blocks):
-                self.block_copy.gather(buffer, blks)
-                await ep.send(buffer)
-            count += len(blocks)
+                blk_seq = get_blk_seq(count, len(blks), self.num_packing_blocks)
+                self.block_copy.gather(buffer, blks) # Gather blocks to buffer
+                await ep.send(buffer) # Write server buffer
+                await ep.am_send(blk_seq) # Notify server what are written
+                count += len(blks)
         self.flags[request_id] = True
         await ep.close()
 

@@ -125,7 +125,9 @@ async def generate(request: Request) -> Response:
     )
     # We assume there is one sequence inside, the prompt
     dummy_seq = seq_group.get_seqs()[0]
-    prefilled_seq.get_seqs()[0].seq_id = dummy_seq.seq_id
+    real_seq = prefilled_seq.get_seqs()[0]
+    real_seq.seq_id = dummy_seq.seq_id
+    real_seq.status = SequenceStatus.RUNNING
 
     # wait for KV cache ready
     await kv_task
