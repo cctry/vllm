@@ -22,16 +22,20 @@ class Recorder:
     def __init__(self, desc):
         self.desc = desc
         self.tagged_time = {}
+        self.tagged_count = {}
 
     @contextmanager
     def record(self, tag):
         start = time.time()
         yield
         end = time.time()
+        elapsed_time = end - start
         if tag not in self.tagged_time:
-            self.tagged_time[tag] = end - start
+            self.tagged_time[tag] = elapsed_time
+            self.tagged_count[tag] = 1
         else:
-            self.tagged_time[tag] += end - start
+            self.tagged_time[tag] += elapsed_time
+            self.tagged_count[tag] += 1
 
     def show(self):
         for tag, t in self.tagged_time.items():

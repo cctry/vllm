@@ -1,70 +1,36 @@
-import requests
+import aiohttp
+import asyncio
 from transformers import AutoTokenizer
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
 import time
 
 
-def benchmark(url, payload, qps, num_request):
-    task_queue = Queue()
-    result_queue = Queue()
+async def benchmark(url, payload, qps, num_request):
+    interval = 1.0 / qps
 
-    def producer():
-        interval = 1.0 / qps
-        for i in range(num_request):
-            task_queue.put((i, url, payload))
-            time.sleep(interval)
+    async def send_request(session, i, url, payload):
+        try:
+            start_time = time.time()
+            async with session.post(url, json=payload) as response:
+                elapsed = time.time() - start_time
+                print(i, response.status, elapsed)
+                return (i, response.status, elapsed)
+        except Exception as e:
+            print(e)
+            return (i, None, None, str(e))
 
-        # Signal the end of production
-        for _ in range(qps):
-            task_queue.put(None)
+    async def producer():
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for i in range(num_request):
+                tasks.append(asyncio.create_task(send_request(session, i, url, payload)))
+                await asyncio.sleep(interval)
+            results = await asyncio.gather(*tasks)
+            return results
 
-    def consumer():
-        while True:
-            task = task_queue.get()
-            if task is None:
-                break
-            i, url, payload = task
-            try:
-                response = requests.post(url, json=payload)
-                print(i, response.status_code, response.elapsed.total_seconds())
-                result_queue.put(
-                    (i, response.status_code, response.elapsed.total_seconds())
-                )
-            except Exception as e:
-                print(e)
-                result_queue.put((i, None, None, str(e)))
-
-    with ThreadPoolExecutor() as executor:
-        producer_thread = executor.submit(producer)
-        consumer_threads = [executor.submit(consumer) for _ in range(qps)]
-        producer_thread.result()
-        # Wait for all consumer threads to finish
-        for future in as_completed(consumer_threads):
-            future.result()
-
-    # total_requests = 0
-    # total_time = 0
-    # error_count = 0
-
-    # while not result_queue.empty():
-    #     status_code, elapsed_time, *error = result_queue.get()
-    #     if error:
-    #         error_count += 1
-    #     else:
-    #         total_requests += 1
-    #         total_time += elapsed_time
-
-    # avg_response_time = total_time / total_requests if total_requests else float('inf')
-    # error_rate = error_count / (total_requests + error_count) if (total_requests + error_count) else 1
-
-    # print(f"Total Requests: {total_requests}")
-    # print(f"Total Errors: {error_count}")
-    # print(f"Average Response Time: {avg_response_time:.2f} seconds")
-    # print(f"Error Rate: {error_rate:.2%}")
-
-
+    results = await producer()
+    # for result in results:
+    #     print(result)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
@@ -73,7 +39,7 @@ if __name__ == "__main__":
     parser.add_argument("--response-length", type=int, required=True)
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8001)
-    parser.add_argument("--qps", type=int, default=1)
+    parser.add_argument("--qps", type=float, default=1)
     parser.add_argument("--num-request", type=int, default=10)
     args = parser.parse_args()
     url = f"http://{args.host}:{args.port}/generate"
@@ -83,9 +49,14 @@ if __name__ == "__main__":
     with open(args.text_file, "r") as f:
         text = f.read()
     inputs = tokenizer(text, return_tensors="pt")
-    assert len(inputs["input_ids"][0]) >= args.prompt_length, "Prompt is short"
     input_ids = inputs["input_ids"][0]
-    prompt_id = input_ids[: args.prompt_length]
+
+    if len(input_ids) >= args.prompt_length:
+        prompt_id = input_ids[: args.prompt_length]
+    else:
+        repeat_count = (args.prompt_length + len(input_ids) - 1) // len(input_ids)
+        prompt_id = (input_ids * repeat_count)[:args.prompt_length]
+    
     prompt = tokenizer.decode(prompt_id)
     payload = {
         "prompt": prompt,
@@ -93,4 +64,4 @@ if __name__ == "__main__":
         "max_tokens": args.response_length,
     }
 
-    benchmark(url, payload, args.qps, args.num_request)
+    asyncio.run(benchmark(url, payload, args.qps, args.num_request))
