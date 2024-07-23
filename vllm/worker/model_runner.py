@@ -685,9 +685,15 @@ class ModelRunner:
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
+            
+            # add request id
+            request_ids = [meta.request_id for meta in seq_group_metadata_list]
+            metadata_dict['request_ids'] = request_ids
+
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
+            request_ids = metadata_dict.pop("request_ids")
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
             selected_token_indices = metadata_dict.pop(
@@ -706,6 +712,9 @@ class ModelRunner:
                 categorized_sample_indices=None,
                 num_prompts=0,
             )
+
+        # append request_ids to metadata
+        attn_metadata.request_ids = request_ids
 
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,

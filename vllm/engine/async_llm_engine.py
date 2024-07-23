@@ -534,11 +534,12 @@ class AsyncLLMEngine:
                         ready_blocks.append(block_table[-1])
                 for block in ready_blocks:
                     block.ref_count += 1
-                # append needed states to request_output
-                request_output.seq_group = seq_group
                 # Add blocks here because the sequence will
                 # later be removed in background
                 request_output.blocks = ready_blocks
+                
+                # append needed states to request_output
+                request_output.seq_group = seq_group
                 # stop this request from generation
                 request_output.finished = not seq_group.is_prefill()
 

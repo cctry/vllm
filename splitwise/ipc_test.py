@@ -3,8 +3,26 @@ import torch
 import asyncio
 import torch.multiprocessing as mp
 import utils
+import struct
 
 block_shape = (16, 8, 128)
+
+
+def serialize_int_list(int_list):
+    byte_array = bytearray(len(int_list) * 4)  # Preallocate the bytearray
+    for i, number in enumerate(int_list):
+        struct.pack_into('i', byte_array, i * 4, number)
+    return byte_array
+
+
+def deserialize_bytearray(byte_array):
+    int_list = [struct.unpack_from('i', byte_array, i * 4)[0] for i in range(len(byte_array) // 4)]
+    return int_list
+
+
+def get_blk_seq(start, num, length):
+    lst = list(range(start, start + num)) + [-1] * (length - num)
+    return serialize_int_list(lst)
 
 class Server(mp.Process):
     def __init__(self, device_id, port, id_queue, obj_queue):
@@ -24,14 +42,12 @@ class Server(mp.Process):
         v_blocks = [v[0](*v[1]) for v in v_meta]
         
         blocks = k_blocks + v_blocks
-        # self.buffer[0].copy_(blocks[0], non_blocking=True)
-        # for i, block in enumerate(blocks[1:]):
-        #     self.buffer[i%2].copy_(block, non_blocking=True)
-        #     await ep.send(self.buffer[(i+1)%2])
-        # ep.send(self.buffer[len(blocks) % 2])
         for block in blocks:
             await ep.recv(self.buffer)
             block.copy_(self.buffer)
+
+        lst = deserialize_bytearray(await ep.am_recv())
+        print(lst)
             
         await ep.close()
         self.lf.close()
@@ -42,7 +58,6 @@ class Server(mp.Process):
             await asyncio.sleep(0.1)
 
     def run(self):
-        # self.buffer = torch.empty((2, *block_shape), device=self.device)
         self.buffer = torch.empty(block_shape, device=self.device)
         asyncio.set_event_loop(self.loop)
         host = utils.set_NIC(self.device_id)
@@ -71,25 +86,22 @@ class Client(mp.Process):
         v_blocks = [v[0](*v[1]) for v in v_meta]
         
         blocks = k_blocks + v_blocks
-        # self.buffer[0].copy_(blocks[0], non_blocking=True)
-        # for i, block in enumerate(blocks[1:]):
-        #     self.buffer[(i+1)%2].copy_(block, non_blocking=True)
-        #     await ep.send(self.buffer[i%2])
-        # ep.send(self.buffer[len(blocks) % 2])
         for block in blocks:
             self.buffer.copy_(block)
             await ep.send(self.buffer)
         
        
         print(f"Sent {len(blocks)} blocks")
+
+
+        seq_num = get_blk_seq(13, 64, 128)
+        await ep.am_send(seq_num)
         
         await ep.close()
         for block in k_blocks + v_blocks:
             block.mul_(2)
         
     def run(self):
-        # self.buffer = torch.empty((2, *block_shape), device=self.device)
-        # self.cuda_events = [torch.cuda.Event(blocking=True) for _ in range(2)]
         self.buffer = torch.empty(block_shape, device=self.device)
         asyncio.set_event_loop(self.loop)
         utils.set_NIC(self.device_id)

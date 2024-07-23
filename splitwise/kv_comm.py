@@ -6,6 +6,10 @@ import torch.multiprocessing as mp
 import ucp
 import utils
 import os
+import struct
+
+def get_blk_seq(start, num, length):
+
 
 class KVComm(mp.Process):
     def __init__(
@@ -32,9 +36,10 @@ class KVComm(mp.Process):
         self.cache_shape = shape
         self.block_shape = shape[3:]
         self.block_size = shape[3] * shape[4] * shape[5] * dtype.itemsize
-        self.buffer_size = 1024 * 1024 * 8  # 8MB
+        self.buffer_size = 1024 * 1024 * 4  # 4 MB
         self.num_packing_blocks = self.buffer_size // self.block_size
         assert self.buffer_size % self.block_size == 0
+        assert self.num_packing_blocks != 0
 
     async def _kv_server_handler(self, ep: ucp.Endpoint):
         id_buffer = await ep.am_recv()
@@ -70,16 +75,19 @@ class KVComm(mp.Process):
         ep = await ucp.create_endpoint(host, port)
         id_buffer = bytearray(request_id, "utf-8")
         await ep.am_send(id_buffer)
+        count = 0
         while True:
-            tensor_data, push_key = await tensor_queue.get()
+            tensor_data = await tensor_queue.get()
             if tensor_data is None:
                 break
             buffer = self.get_buffer()
             blocks = [func(*args) for (func, args) in tensor_data]
+            # FIXME: Each batch send will have the tail group is partial. We need to include the block seq number.
             for blks in utils.chunk(blocks, self.num_packing_blocks):
                 self.block_copy.gather(buffer, blks)
                 await ep.send(buffer)
-            self.flags[push_key] = True
+            count += len(blocks)
+        self.flags[request_id] = True
         await ep.close()
 
     def kv_client(self):
@@ -89,7 +97,7 @@ class KVComm(mp.Process):
             tasks = {}
             while True:
                 if not self.requests_queue.empty():
-                    request_id, host, port, tensor_data, push_key = (
+                    request_id, host, port, tensor_data = (
                         self.requests_queue.get(True)
                     )
                     if request_id not in tasks:
@@ -102,7 +110,7 @@ class KVComm(mp.Process):
                         task.add_done_callback(
                             lambda task: tasks.pop(task.get_name())
                         )
-                    tasks[request_id][1].put_nowait((tensor_data, push_key))
+                    tasks[request_id][1].put_nowait(tensor_data)
                 await asyncio.sleep(0)
 
         asyncio.run(_kv_client())
