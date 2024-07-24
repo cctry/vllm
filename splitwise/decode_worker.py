@@ -10,7 +10,7 @@ import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from test_stub import get_prefill_worker
-from utils import call_kv_method, deserialize_seq_group
+from utils import call_kv_method, deserialize_seq_group, timer
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.scheduler import Scheduler
@@ -115,28 +115,62 @@ async def generate(request: Request) -> Response:
     # create a dummy sequence group to reserve cache
     seq_group = await create_seq_group(request_id, prompt, sampling_params)
 
-    # start to listen for KV cache
-    kv_task = start_pulling_KV(request_id, seq_group)
+    # # start to listen for KV cache
+    # kv_task = start_pulling_KV(request_id, seq_group)
 
-    addr, host = get_prefill_worker()
-    comm = PrefillWorker(addr, host)
-    prefilled_seq = await comm.start_prefill(
-        http_session, request_info, request_id
-    )
-    # We assume there is one sequence inside, the prompt
-    dummy_seq = seq_group.get_seqs()[0]
-    real_seq = prefilled_seq.get_seqs()[0]
-    real_seq.seq_id = dummy_seq.seq_id
-    real_seq.status = SequenceStatus.RUNNING
+    # addr, host = get_prefill_worker()
+    # comm = PrefillWorker(addr, host)
+    # prefilled_seq = await comm.start_prefill(
+    #     http_session, request_info, request_id
+    # )
+    # # We assume there is one sequence inside, the prompt
+    # dummy_seq = seq_group.get_seqs()[0]
+    # real_seq = prefilled_seq.get_seqs()[0]
+    # real_seq.seq_id = dummy_seq.seq_id
+    # real_seq.status = SequenceStatus.RUNNING
 
-    # wait for KV cache ready
-    await kv_task
+    # # wait for KV cache ready
+    # await kv_task
 
-    # resume inference
-    stream = resume_request(request_id, prefilled_seq)
-    final_output = None
-    async for request_output in stream:
-        final_output = request_output
+    # # resume inference
+    # stream = resume_request(request_id, prefilled_seq)
+    # final_output = None
+    # async for request_output in stream:
+    #     final_output = request_output
+    
+    with timer(f"[test] [{request_id}]") as t:
+        # start to listen for KV cache
+        kv_task = start_pulling_KV(request_id, seq_group)
+
+        addr, host = get_prefill_worker()
+        comm = PrefillWorker(addr, host)
+        prefilled_seq = await comm.start_prefill(
+            http_session, request_info, request_id
+        )
+        # We assume there is one sequence inside, the prompt
+        dummy_seq = seq_group.get_seqs()[0]
+        real_seq = prefilled_seq.get_seqs()[0]
+        real_seq.seq_id = dummy_seq.seq_id
+        real_seq.status = SequenceStatus.RUNNING
+
+        # wait for KV cache ready
+        await kv_task
+
+        decode_cm = t.record("Decode")
+        decode_cm.__enter__()
+
+        # resume inference
+        stream = resume_request(request_id, prefilled_seq)
+        final_output = None
+        async for request_output in stream:
+            decode_cm.__exit__(None, None, None)
+            final_output = request_output
+            decode_cm = t.record("Decode")
+            decode_cm.__enter__()
+        decode_cm.__exit__(None, None, None)
+        t.tagged_time["Decode"] /= t.tagged_count["Decode"] - 1
+
+
     assert final_output is not None
     prompt = final_output.prompt
     text = [prompt + output.text for output in final_output.outputs]
