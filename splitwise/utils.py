@@ -144,7 +144,11 @@ def dump_NIC():
         assert (
             len(mlxs) > 0
         ), f"Unable to find NIC connected to GPU {i} with PXB"
-        nics = [(mlx, rdma_link[mlx]) for mlx in mlxs if mlx in rdma_link]
+        nics = [
+            (mlx, rdma_link[mlx])
+            for mlx in mlxs
+            if mlx in rdma_link and int(rdma_link[mlx][-1]) % 2 == 0
+        ]
         mlx_nic, eth_nic = nics[i % 2]
         data[i] = {
             "mlx": mlx_nic,
@@ -167,7 +171,7 @@ RNDV_THRESH = 8192
 
 def set_NIC(device_id, init_ucx=True):
     info = detect_NIC(device_id)
-    rdma_nic, addr = info['mlx'], info['address']
+    rdma_nic, addr = info["mlx"], info["address"]
     if init_ucx:
         ucp.init(
             options={

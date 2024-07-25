@@ -25,7 +25,6 @@ from vllm.logger import init_logger
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-print(sys.path)
 from utils import timer
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
@@ -52,13 +51,14 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
+    message = request_dict.pop("message", "")
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
     assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
-    with timer(f"[test] [{request_id}]") as t:
+    with timer(f"[test{message}] [{request_id}]") as t:
         # Non-streaming case
         final_output = None
         prefill_cm = t.record("Prefill")
@@ -80,6 +80,7 @@ async def generate(request: Request) -> Response:
     prompt = final_output.prompt
     text_outputs = [prompt + output.text for output in final_output.outputs]
     ret = {"text": text_outputs}
+    sys.stdout.flush()
     return JSONResponse(ret)
 
 

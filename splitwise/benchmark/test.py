@@ -41,6 +41,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--qps", type=float, default=1)
     parser.add_argument("--num-request", type=int, default=10)
+    parser.add_argument("--message", type=str, default="")
     args = parser.parse_args()
     url = f"http://{args.host}:{args.port}/generate"
 
@@ -59,6 +60,7 @@ if __name__ == "__main__":
     
     prompt = tokenizer.decode(prompt_id)
     payload = {
+        "message": args.message,
         "prompt": prompt,
         "temperature": 0.0,
         "max_tokens": args.response_length,
