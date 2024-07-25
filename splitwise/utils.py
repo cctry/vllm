@@ -1,9 +1,12 @@
 import asyncio
 import base64
 import contextlib
+import fcntl
+import json
 import os
 import pickle
-import re
+import socket
+import struct
 import subprocess
 import time
 import zlib
@@ -91,56 +94,93 @@ def get_real_device_id(device_id):
     return device_id
 
 
+def get_address(ifname):
+    ifname = ifname.encode()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        return socket.inet_ntoa(
+            fcntl.ioctl(
+                s.fileno(),
+                0x8915,
+                struct.pack("256s", ifname[:15]),  # SIOCGIFADDR
+            )[20:24]
+        )
+
+
+def dump_NIC():
+    num_gpu = torch.cuda.device_count()
+    topo_proc = subprocess.Popen(
+        ["nvidia-smi", "topo", "-m"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    rdma_proc = subprocess.Popen(
+        ["rdma", "link"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    rdma_out = rdma_proc.communicate()[0]
+    active_flag = "state ACTIVE physical_state LINK_UP"
+    rdma_link = {}
+    for link in rdma_out.split("\n"):
+        if active_flag in link:
+            mlx = link.split(" ")[1][:-2]
+            eth = link.split(" ")[-2]
+            rdma_link[mlx] = eth
+
+    data = {}
+
+    topo_out = topo_proc.communicate()[0]
+    topo_lines = topo_out.split("\n")
+    devices = topo_lines[0][5:].split()[:-4]
+    for i in range(num_gpu):
+        device = devices[i]
+        conns = topo_lines[i + 1].split()[:-2]
+        assert conns[0] == device, "Pasing error"
+        assert len(conns[1:]) == len(devices), "Parsing error"
+        mlxs = [devices[i] for i, conn in enumerate(conns[1:]) if conn == "PXB"]
+        assert (
+            len(mlxs) > 0
+        ), f"Unable to find NIC connected to GPU {i} with PXB"
+        nics = [(mlx, rdma_link[mlx]) for mlx in mlxs if mlx in rdma_link]
+        mlx_nic, eth_nic = nics[i % 2]
+        data[i] = {
+            "mlx": mlx_nic,
+            "eth": eth_nic,
+            "address": get_address(eth_nic),
+        }
+
+    return data
+
+
 def detect_NIC(device_id):
     device_id = get_real_device_id(device_id)
-    topo_output = subprocess.check_output(
-        ["nvidia-smi", "topo", "-m"], text=True
-    )
-    ansi_escape = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
-    topo_output = ansi_escape.sub("", topo_output)
-    topo_lines = topo_output.split("\n")
-    devices = topo_lines[0].split()[:-4]
-    device = devices[device_id]
-    conns = topo_lines[device_id + 1].split()[:-2]
-    assert conns[0] == device, "Pasing error"
-    assert len(conns[1:]) == len(devices), "Parsing error"
-    mlxs = [devices[i] for i, conn in enumerate(conns[1:]) if conn == "PXB"]
+    with open("/tmp/rdma_link.json", "r") as f:
+        data = json.load(f)
+    return data[str(device_id)]
 
-    rdma_output = subprocess.check_output(["rdma", "link"], text=True)
-    interfaces = {}
-    pattern = re.compile(
-        rf'(?:{"|".join(mlxs)})/\d+.*LINK_UP.*netdev\s+(\w+\d+)'
-    )
-    number_pattern = re.compile(r"\d+")
-
-    for match in re.finditer(pattern, rdma_output):
-        interface_name = match.group(1)
-        interface_number = int(number_pattern.search(interface_name).group())
-        if interface_number % 2 == 0:  # only even eth interfaces
-            target = next(t for t in mlxs if t in match.group())
-            interfaces[target] = interface_name
-
-    assert len(interfaces) > 0, "No RDMA interfaces found"
-    return list(interfaces.items())[device_id % 2]
 
 RNDV_THRESH = 8192
 
+
 def set_NIC(device_id, init_ucx=True):
-    rdma_nic, eth_nic = detect_NIC(device_id)
+    info = detect_NIC(device_id)
+    rdma_nic, addr = info['mlx'], info['address']
     if init_ucx:
         ucp.init(
             options={
                 "NET_DEVICES": f"{rdma_nic}:1",
                 "TLS": "rc_mlx5,cuda",
-                "RNDV_THRESH": str(RNDV_THRESH)
+                "RNDV_THRESH": str(RNDV_THRESH),
             },
             blocking_progress_mode=True,
         )
         device = torch.device(f"cuda:{device_id}")
         am_allocator = partial(torch.zeros, dtype=torch.uint8, device=device)
         ucp.register_am_allocator(am_allocator, "cuda")
-    host = ucp.get_address(ifname=eth_nic)
-    return host
+    return addr
 
 
 async def call_kv_method(engine, method: str, *args, **kwargs):

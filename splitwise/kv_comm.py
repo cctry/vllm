@@ -71,8 +71,8 @@ class KVComm(mp.Process):
         remaining = len(blocks)
         buffer = self.get_buffer() # This buffer may from Rust
         while remaining > 0:
-            await ep.recv(buffer) # Buffer is written
             blk_seq = await ep.am_recv() # Notified with the sent blocks
+            await ep.recv(buffer) # Buffer is written
             idx = from_blk_seq(blk_seq)
             blks = [blocks[i] for i in idx] # Figure out the addresses
             self.block_copy.scatter(blks, buffer) # Scatter
@@ -92,9 +92,14 @@ class KVComm(mp.Process):
                 if not self.requests_queue.empty():
                     request_id, tensor_data = self.requests_queue.get()
                     self.pending_requests[request_id] = tensor_data
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.1)
 
-        asyncio.run(_kv_server())
+        try:
+            asyncio.run(_kv_server())
+        except Exception as e:
+            raise e
+        finally:
+            self.lf.close()
 
     async def _kv_push(self, host, port, request_id, tensor_queue):
         ep = await ucp.create_endpoint(host, port)
@@ -110,8 +115,8 @@ class KVComm(mp.Process):
             for blks in utils.chunk(blocks, self.num_packing_blocks):
                 blk_seq = get_blk_seq(count, len(blks), self.num_packing_blocks)
                 self.block_copy.gather(buffer, blks) # Gather blocks to buffer
-                await ep.send(buffer) # Write server buffer
                 await ep.am_send(blk_seq) # Notify server what are written
+                await ep.send(buffer) # Write remote buffer
                 count += len(blks)
         self.flags[request_id] = True
         await ep.close()
@@ -137,7 +142,7 @@ class KVComm(mp.Process):
                             lambda task: tasks.pop(task.get_name())
                         )
                     tasks[request_id][1].put_nowait(tensor_data)
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.1)
 
         asyncio.run(_kv_client())
 
