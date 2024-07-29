@@ -7,11 +7,12 @@ import torch
 import torch.multiprocessing as mp
 import utils
 from kv_comm import KVComm
+import random
 
 from vllm.worker.worker import Worker
 
 KV_TIMEOUT = 30
-BUFFER_SIZE = 4 * 1024 * 1024  # 4MB
+BUFFER_SIZE = 1 * 1024 * 1024  # 4MB
 
 
 class WorkerSplitwise(Worker):
@@ -62,6 +63,7 @@ class WorkerSplitwise(Worker):
         """Initialize the KV cache communicator as the decode worker"""
         shape, dtype, device, host = self.setup()
         self.port = port + self.local_rank
+        addr = f"{host}:{self.port}"
         self.kv_comm = KVComm(
             device,
             dtype,
@@ -70,7 +72,7 @@ class WorkerSplitwise(Worker):
             self.requests_queue,
             self.flags,
             BUFFER_SIZE,
-            server_port=self.port,
+            local_addr=addr,
         )
         self.kv_comm.start()
         return {"device": self.local_rank, "host": host, "port": self.port}
@@ -78,6 +80,7 @@ class WorkerSplitwise(Worker):
     def prefill_kv_init(self, layer_wise=-1):
         """Initialize the KV cache communicator as the prefill worker"""
         shape, dtype, device, host = self.setup()
+        port = random.randint(40000, 60000)
         self.kv_comm = KVComm(
             device,
             dtype,
@@ -86,6 +89,7 @@ class WorkerSplitwise(Worker):
             self.requests_queue,
             self.flags,
             BUFFER_SIZE,
+            local_addr=f"{host}:{port}"
         )
         self.kv_comm.start()
 
