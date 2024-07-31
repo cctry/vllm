@@ -13,6 +13,7 @@ async def benchmark(url, payload, qps, num_request):
             start_time = time.time()
             async with session.post(url, json=payload) as response:
                 elapsed = time.time() - start_time
+                # data = await response.json()
                 print(i, response.status, elapsed)
                 return (i, response.status, elapsed)
         except Exception as e:
@@ -60,7 +61,7 @@ if __name__ == "__main__":
     
     prompt = tokenizer.decode(prompt_id)
     payload = {
-        "message": args.message,
+        # "message": args.message,
         "prompt": prompt,
         "temperature": 0.0,
         "max_tokens": args.response_length,

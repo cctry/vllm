@@ -11,8 +11,8 @@ import random
 
 from vllm.worker.worker import Worker
 
-KV_TIMEOUT = 30
-BUFFER_SIZE = 1 * 1024 * 1024  # 4MB
+KV_TIMEOUT = 120
+BUFFER_SIZE = 4 * 1024 * 1024  # 4MB
 
 
 class WorkerSplitwise(Worker):
@@ -23,7 +23,7 @@ class WorkerSplitwise(Worker):
         block_shape = tuple(cache.shape)[-3:]
         self._manager = mp.Manager()
         self.flags = self._manager.dict()
-        self.requests_queue = mp.Queue()
+        self.requests_queue = mp.Queue(1024)
         host = utils.set_NIC(self.local_rank, False)
         self.kv_addr = {}
         # compile the gather/scatter kernels
@@ -80,7 +80,6 @@ class WorkerSplitwise(Worker):
     def prefill_kv_init(self, layer_wise=-1):
         """Initialize the KV cache communicator as the prefill worker"""
         shape, dtype, device, host = self.setup()
-        port = random.randint(40000, 60000)
         self.kv_comm = KVComm(
             device,
             dtype,
@@ -89,9 +88,11 @@ class WorkerSplitwise(Worker):
             self.requests_queue,
             self.flags,
             BUFFER_SIZE,
-            local_addr=f"{host}:{port}"
+            local_addr=f"{host}"
         )
         self.kv_comm.start()
+
+        self.rust_th = start(KV_ptr)
 
         layers = self.model_runner.model.model.layers
         block_size = self.model_runner.block_size
@@ -134,18 +135,27 @@ class WorkerSplitwise(Worker):
         """Listen for the kv cache."""
         tensor_data = self.get_kv_blocks_data(block_ids)
         self.flags[request_id] = False
-        self.requests_queue.put(
+        self.rust_th.queue.put(
             (
                 request_id,
                 tensor_data,
             )
         )
+        # start = time.time()
+        # while not self.flags[request_id]:
+        #     if time.time() - start > KV_TIMEOUT:
+        #         raise TimeoutError(f"KV cache pull for {request_id} timeout")
+        #     time.sleep(0.1)
+        # self.flags.pop(request_id)
+
+    def wait_pull_kv(self, request_id: str):
         start = time.time()
         while not self.flags[request_id]:
             if time.time() - start > KV_TIMEOUT:
                 raise TimeoutError(f"KV cache pull for {request_id} timeout")
-            time.sleep(0.1)
+            time.sleep(1/1000)
         self.flags.pop(request_id)
+
 
     def push_kv(
         self, request_id: str, block_ids: List[int], layers: List[int], kv_addr

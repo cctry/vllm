@@ -77,16 +77,48 @@ void scatter(std::vector<at::Tensor> dst, at::Tensor& src) {{
         scatter_kernel<<<dst.size(), num_thd, 0, at::cuda::getCurrentCUDAStream()>>>(dst_ptrs, src_ptr);
     }}));
 }}
+
+void gather_ptr(uint64_t dst, std::vector<at::Tensor> src) {{
+    auto device = src[0].device();
+    at::cuda::CUDAGuard device_guard(device);
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::BFloat16, at::ScalarType::Half, src[0].type(), "gather_ptr", ([&] {{
+        ptr_arr src_ptrs;
+        auto dst_ptr = (float4*)dst;
+        for (int i=0; i < src.size(); i++) {{
+            src_ptrs.ptrs[i] = (float4*)src[i].data_ptr<scalar_t>();
+        }}
+        static_assert(block_size % num_thd == 0);
+        static_assert(block_size % 16 == 0);
+        gather_kernel<<<src.size(), num_thd, 0, at::cuda::getCurrentCUDAStream()>>>(dst_ptr, src_ptrs);
+    }}));
+}}
+
+void scatter_ptr(std::vector<at::Tensor> dst, uint64_t src) {{
+    auto device = dst[0].device();
+    at::cuda::CUDAGuard device_guard(device);
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::BFloat16, at::ScalarType::Half, dst[0].type(), "scatter_ptr", ([&] {{
+        ptr_arr dst_ptrs;
+        auto src_ptr = (float4*)src;
+        for (int i=0; i < dst.size(); i++) {{
+            dst_ptrs.ptrs[i] = (float4*)dst[i].data_ptr<scalar_t>();
+        }}
+        static_assert(block_size % num_thd == 0);
+        static_assert(block_size % 16 == 0);
+        scatter_kernel<<<dst.size(), num_thd, 0, at::cuda::getCurrentCUDAStream()>>>(dst_ptrs, src_ptr);
+    }}));
+}}
     """
     cpp = """
 void gather(at::Tensor& dst, std::vector<at::Tensor> src);
 void scatter(std::vector<at::Tensor> dst, at::Tensor& src);
+void gather_ptr(uint64_t dst, std::vector<at::Tensor> src);
+void scatter_ptr(std::vector<at::Tensor> dst, uint64_t src);
         """
     return load_inline(
         f"block_copy_{num_block}_{block_size}_{num_thd}",
         cpp_sources=[cpp],
         cuda_sources=[cuda],
-        functions=["gather", "scatter"],
+        functions=["gather", "scatter", "gather_ptr", "scatter_ptr"],
         extra_cuda_cflags=["-O3", "-lineinfo"],
     )
 

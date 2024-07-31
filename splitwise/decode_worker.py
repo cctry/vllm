@@ -140,7 +140,8 @@ async def generate(request: Request) -> Response:
     
     with timer(f"[test] [{request_id}]") as t:
         # start to listen for KV cache
-        kv_task = start_pulling_KV(request_id, seq_group)
+        # kv_task = start_pulling_KV(request_id, seq_group)
+        await start_pulling_KV(request_id, seq_group)
 
         addr, host = get_prefill_worker()
         comm = PrefillWorker(addr, host)
@@ -154,7 +155,8 @@ async def generate(request: Request) -> Response:
         real_seq.status = SequenceStatus.RUNNING
 
         # wait for KV cache ready
-        await kv_task
+        # await kv_task
+        await call_kv_method(engine, "wait_pull_kv", request_id)
 
         decode_cm = t.record("Decode")
         decode_cm.__enter__()
