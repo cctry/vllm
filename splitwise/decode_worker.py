@@ -88,11 +88,11 @@ async def create_seq_group(
     return seq_group
 
 
-def start_pulling_KV(request_id, seq_group):
+def pulling_KV(request_id, seq_group):
     seq = seq_group.get_seqs()[0]
     block_ids = block_manager.get_block_table(seq)
     task = asyncio.create_task(
-        call_kv_method(engine, "pull_kv", request_id, block_ids)
+        call_kv_method(engine, "add_request", request_id, block_ids)
     )
     return task
 
@@ -114,33 +114,8 @@ async def generate(request: Request) -> Response:
     sampling_params = SamplingParams(**request_dict)
     # create a dummy sequence group to reserve cache
     seq_group = await create_seq_group(request_id, prompt, sampling_params)
-
-    # # start to listen for KV cache
-    # kv_task = start_pulling_KV(request_id, seq_group)
-
-    # addr, host = get_prefill_worker()
-    # comm = PrefillWorker(addr, host)
-    # prefilled_seq = await comm.start_prefill(
-    #     http_session, request_info, request_id
-    # )
-    # # We assume there is one sequence inside, the prompt
-    # dummy_seq = seq_group.get_seqs()[0]
-    # real_seq = prefilled_seq.get_seqs()[0]
-    # real_seq.seq_id = dummy_seq.seq_id
-    # real_seq.status = SequenceStatus.RUNNING
-
-    # # wait for KV cache ready
-    # await kv_task
-
-    # # resume inference
-    # stream = resume_request(request_id, prefilled_seq)
-    # final_output = None
-    # async for request_output in stream:
-    #     final_output = request_output
     
     with timer(f"[test] [{request_id}]") as t:
-        # start to listen for KV cache
-        kv_task = start_pulling_KV(request_id, seq_group)
 
         addr, host = get_prefill_worker()
         comm = PrefillWorker(addr, host)
@@ -154,7 +129,8 @@ async def generate(request: Request) -> Response:
         real_seq.status = SequenceStatus.RUNNING
 
         # wait for KV cache ready
-        await kv_task
+        await pulling_KV(request_id, seq_group)
+
 
         decode_cm = t.record("Decode")
         decode_cm.__enter__()

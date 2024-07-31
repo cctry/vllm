@@ -1,17 +1,16 @@
+# from kv_comm import KVComm
+import random
 import time
+from collections import defaultdict
 from itertools import accumulate
 from typing import Dict, List, Optional, Tuple
-import rdma_transport
 
+import rdma_transport
 import torch
 import torch.multiprocessing as mp
 import utils
-
-# from kv_comm import KVComm
-import random
-
+import asyncio
 from vllm.worker.worker import Worker
-
 
 KV_TIMEOUT = 30
 BUFFER_SIZE = 1 * 1024 * 1024  # 4MB
@@ -41,43 +40,85 @@ class KVComm:
         # TODO: start RDAM thread
         if role == "server":
             self.server = rdma_transport.RdmaServer(
-                self.local_addr, self.device_id
+                self.local_addr,
+                self.device_id,
             )
+            self.server.listen()
         elif role == "client":
             self.clients = {}
             self.remote_base_ptr = {}
+        self.pending_requests = {}
+        self.remaining_blocks = {}
 
-    def push_kv(self, request_id, kv_addr, layers, block_ids):
-        info = next(info for info in kv_addr if info["device"] == self.rank)
-        server_addr = f'{info["host"]}:{info["port"]}'
+        self.loop = asyncio.get_event_loop()
+
+    def get_client(self, server_addr):
         if server_addr not in self.clients:
-            client = rdma_transport.RdmaClient(self.local_addr, self.device_id)
+            client = rdma_transport.RdmaClient(
+                self.local_addr,
+                self.device_id,
+                # base_ptr?
+            )
             remote_base_ptr = client.connect(server_addr)  # Can we do this?
             self.clients[server_addr] = client
             self.remote_base_ptr[server_addr] = remote_base_ptr
         else:
             client = self.clients[server_addr]
             remote_base_ptr = self.remote_base_ptr[server_addr]
+        return client, remote_base_ptr
 
-        for blk in block_ids:
-            for layer in layers:
-                local_base = self.local_base[layer]
-                remote_base = remote_base_ptr[layer]
-                client.send(
-                    local_base,
-                    remote_base,
-                    blk * self.block_size,
-                    # metadata?
-                )
-                client.send(
-                    local_base + self.kv_stride,
-                    remote_base + self.kv_stride,
-                    blk * self.block_size,
-                    # metadata?
-                )
-        
+    def add_request(
+        self, request_id: str, server_addr: str, block_ids: List[int]
+    ):
+        assert request_id not in self.pending_requests
+        self.pending_requests[request_id] = (server_addr, block_ids)
+        self.remaining_blocks[request_id] = len(block_ids) * self.num_layer * 2
+
+    def push_kv(
+        self,
+        request_ids: List[str],
+        local_block_ids: List[List[int]],
+        layers: List[int],
+    ):
+        requests = defaultdict(list)
+        for rid, local_bid in zip(request_ids, local_block_ids):
+            addr, remote_bid = self.pending_requests[rid]
+            requests[addr].append((rid, local_bid, remote_bid))
+
+        for addr, request_info in requests.items():
+            client, remote_base = self.get_client(addr)
+            for rid, local_bid, remote_bid in request_info:
+                remaining = self.remaining_blocks[rid]
+                for layer in layers:
+                    remote_base_ptr = remote_base[layer]
+                    local_base_ptr = self.local_base[layer]
+                    for l_bid, r_bid in zip(local_bid, remote_bid):
+                        client.send(
+                            local_base_ptr,
+                            remote_base_ptr,
+                            l_bid * self.block_size,  # local offset
+                            r_bid * self.block_size,  # remote offset
+                            self.block_size,  # size
+                            rid,  # request id
+                            remaining - 1,  # remaining
+                        )
+                        client.send(
+                            local_base_ptr,
+                            remote_base_ptr,
+                            self.kv_stride
+                            + l_bid * self.block_size,  # local offset
+                            self.kv_stride
+                            + r_bid * self.block_size,  # remote offset
+                            self.block_size,  # size
+                            rid,  # request id
+                            remaining - 2,  # remaining
+                        )
+                        remaining -= 2
+                self.remaining_blocks[rid] = remaining
+
         def wait_kv(self, request_id):
-            pass # TODO
+            # TODO: Wait for the request to finish
+            self.pending_requests.pop(request_id)
 
 
 class WorkerSplitwise(Worker):
@@ -87,7 +128,6 @@ class WorkerSplitwise(Worker):
         assert self.local_rank == cache.device.index
         info = utils.detect_NIC(self.local_rank)
         addr = info["address"]
-        self.kv_addr = {}
         return addr
 
     def decode_kv_init(self, port: int):
@@ -124,16 +164,21 @@ class WorkerSplitwise(Worker):
 
             def new_forward(*args, **kwargs):
                 output = old_forward(*args, **kwargs)
+                # TODO: If there is chunked prefill, we need to get the actual computed block ids for this iteration.
+                # Besides, we need to figure out the remote block id for this iteration as well.
+                # For now, the chunked prefill has not benefits, so we just push the whole layer.
                 slot_mapping = args[3].slot_mapping
                 block_ids = (slot_mapping // block_size).cpu()
                 indices = list(accumulate(args[3].seq_lens))[:-1]
                 block_ids = block_ids.tensor_split(indices)
-                for req_id, block_id in zip(args[3].request_ids, block_ids):
-                    addr = self.kv_addr[req_id]
-                    block_id = torch.unique_consecutive(block_id)
-                    self.kv_comm.push_kv(
-                        req_id, block_id.tolist(), layers, addr
-                    )
+                block_ids = [
+                    torch.unique_consecutive(bid).tolist() for bid in block_ids
+                ]
+                # CSY: Also, we might want to get the local block ids from sequence metadata 
+                # to avoid the D2H transfer blocking CPU
+
+                self.kv_comm.push_kv(args[3].request_ids, block_ids, layers)
+
                 return output
 
             return new_forward if is_push else old_forward
@@ -144,11 +189,16 @@ class WorkerSplitwise(Worker):
         return {"device": self.local_rank, "host": host}
 
     def finish_push_kv(self, request_id: str):
-        """Wait for the push_kv to finish.
-        """
-        self.kv_comm.wait_kv(request_id) # block here
-        self.kv_addr.pop(request_id)
+        """Wait for the push_kv to finish."""
+        self.kv_comm.wait_kv(request_id)  # block here
 
-    def add_kv_addr(self, request_id, addr): # Will be called from driver
-        assert request_id not in self.kv_addr
-        self.kv_addr[request_id] = addr
+    def add_request(
+        self, request_id, kv_addr, block_ids
+    ):  # Will be called from driver
+        assert request_id not in self.pending_requests
+        info = next(
+            info for info in kv_addr if info["device"] == self.local_rank
+        )
+        self.kv_comm.add_request(
+            request_id, f"{info['host']}:{info['port']}", block_ids
+        )
