@@ -53,10 +53,11 @@ if __name__ == "__main__":
     input_ids = inputs["input_ids"][0]
 
     if len(input_ids) >= args.prompt_length:
-        prompt_id = input_ids[: args.prompt_length]
-    else:
-        repeat_count = (args.prompt_length + len(input_ids) - 1) // len(input_ids)
-        prompt_id = (input_ids * repeat_count)[:args.prompt_length]
+        prompt_id = input_ids[: args.prompt_length - 1]
+    assert len(input_ids) >= args.prompt_length
+    # else:
+    #     repeat_count = (args.prompt_length + len(input_ids) - 1) // len(input_ids)
+    #     prompt_id = (input_ids * repeat_count)[:args.prompt_length]
     
     prompt = tokenizer.decode(prompt_id)
     payload = {
