@@ -1,28 +1,31 @@
 # from kv_comm import KVComm
+import asyncio
 import random
 import time
 from collections import defaultdict
+from functools import lru_cache
 from itertools import accumulate
 from typing import Dict, List, Optional, Tuple
-from functools import lru_cache
 
+import torch
+import torch.multiprocessing as mp
+import utils
 from rdma_transport import (
     TensorBlock,
     TensorBlocks,
     VllmRdmaClient,
     VllmRdmaServer,
 )
-import torch
-import torch.multiprocessing as mp
-import utils
-import asyncio
+
 from vllm.worker.worker import Worker
 
 KV_TIMEOUT = 30
 
+
 @lru_cache()
 def to_byte(s):
-    return s.encode('ascii')
+    return s.encode("ascii")
+
 
 class KVComm:
     def __init__(
@@ -44,14 +47,14 @@ class KVComm:
             * cache[0].dtype.itemsize
         )  # in bytes
         self.local_base = [t.data_ptr() for t in cache]
-        self.kv_stride = cache[0].stride[0]
+        self.kv_stride = cache[0].stride()[0]
 
         self.tensor_blocks = TensorBlocks()
         for c in cache:
             self.tensor_blocks.add(
                 TensorBlock(c.data_ptr(), 0, c.numel() * c.element_size())
             )
-
+        self.role = role
         if role == "server":
             self.server = VllmRdmaServer(
                 self.local_addr, self.device_id, self.tensor_blocks
@@ -63,8 +66,6 @@ class KVComm:
         self.pending_requests = {}
         self.remaining_blocks = {}
 
-        self.loop = asyncio.get_event_loop()
-
     def get_client(self, server_addr):
         if server_addr not in self.clients:
             client = VllmRdmaClient(
@@ -72,7 +73,8 @@ class KVComm:
             )
             remote_tb: TensorBlocks = client.connect(server_addr)
             self.clients[server_addr] = client
-            self.remote_base_ptr[server_addr] = remote_tb.get_base_ptrs()
+            remote_base_ptr = remote_tb.get_base_ptrs()
+            self.remote_base_ptr[server_addr] = remote_base_ptr
         else:
             client = self.clients[server_addr]
             remote_base_ptr = self.remote_base_ptr[server_addr]
@@ -104,51 +106,50 @@ class KVComm:
                     remote_base_ptr = remote_base[layer]
                     local_base_ptr = self.local_base[layer]
                     for l_bid, r_bid in zip(local_bid, remote_bid):
-                        self.loop.run_until_complete(
-                            client.send(
-                                TensorBlock(
-                                    local_base_ptr,
-                                    l_bid * self.block_size,  # local offset
-                                    self.block_size,  # size
-                                ),
-                                TensorBlock(
-                                    remote_base_ptr,
-                                    r_bid * self.block_size,  # local offset
-                                    self.block_size,  # size
-                                ),
-                                to_byte(rid),  # request id
-                                remaining - 1,  # remaining
-                            )
+                        client.send(
+                            TensorBlock(
+                                local_base_ptr,
+                                l_bid * self.block_size,  # local offset
+                                self.block_size,  # size
+                            ),
+                            TensorBlock(
+                                remote_base_ptr,
+                                r_bid * self.block_size,  # local offset
+                                self.block_size,  # size
+                            ),
+                            to_byte(rid),  # request id
+                            remaining - 1,  # remaining
                         )
-                        self.loop.run_until_complete(
-                            client.send(
-                                TensorBlock(
-                                    local_base_ptr,
-                                    self.kv_stride
-                                    + l_bid * self.block_size,  # local offset
-                                    self.block_size,  # size
-                                ),
-                                TensorBlock(
-                                    remote_base_ptr,
-                                    self.kv_stride
-                                    + r_bid * self.block_size,  # local offset
-                                    self.block_size,  # size
-                                ),
-                                to_byte(rid),  # request id
-                                remaining - 2,  # remaining
-                            )
+                        client.send(
+                            TensorBlock(
+                                local_base_ptr,
+                                self.kv_stride
+                                + l_bid * self.block_size,  # local offset
+                                self.block_size,  # size
+                            ),
+                            TensorBlock(
+                                remote_base_ptr,
+                                self.kv_stride
+                                + r_bid * self.block_size,  # local offset
+                                self.block_size,  # size
+                            ),
+                            to_byte(rid),  # request id
+                            remaining - 2,  # remaining
                         )
                         remaining -= 2
                 self.remaining_blocks[rid] = remaining
 
-        def wait_kv(self, request_id):
-            start = time.time()
-            while self.server.is_complete(to_byte(request_id)) is None:
-                if time.time() - start > KV_TIMEOUT:
-                    raise TimeoutError(
-                        f"KV cache pull for {request_id} timeout"
-                    )
-                time.sleep(1 / 1000)
+    def wait_kv(self, request_id):
+        if self.role == "server":
+            handle = self.server
+        elif self.role == "client":
+            addr, _ = self.pending_requests[request_id]
+            handle = self.clients[addr]
+        start = time.time()
+        while handle.is_complete(to_byte(request_id)) is None:
+            if time.time() - start > KV_TIMEOUT:
+                raise TimeoutError(f"KV cache pull for {request_id} timeout")
+            time.sleep(1 / 1000)
 
 
 class WorkerSplitwise(Worker):
@@ -198,15 +199,13 @@ class WorkerSplitwise(Worker):
                 # Besides, we need to figure out the remote block id for this iteration as well.
                 # For now, the chunked prefill has not benefits, so we just push the whole layer.
                 slot_mapping = args[3].slot_mapping
-                block_ids = (slot_mapping // block_size).cpu()
                 indices = list(accumulate(args[3].seq_lens))[:-1]
+                # This ensures the computation of this layer finish
+                block_ids = (slot_mapping // block_size).cpu()
                 block_ids = block_ids.tensor_split(indices)
                 block_ids = [
                     torch.unique_consecutive(bid).tolist() for bid in block_ids
                 ]
-                # CSY: Also, we might want to get the local block ids from sequence metadata
-                # to avoid the D2H transfer blocking CPU
-
                 self.kv_comm.push_kv(args[3].request_ids, block_ids, layers)
 
                 return output
