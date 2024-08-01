@@ -7,6 +7,7 @@ from functools import lru_cache
 from itertools import accumulate
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.multiprocessing as mp
 import utils
@@ -25,6 +26,21 @@ KV_TIMEOUT = 30
 @lru_cache()
 def to_byte(s):
     return s.encode("ascii")
+
+
+def coalesce_indices(local_indices, remote_indices):
+    sorted_indices = np.argsort(local_indices)
+    local_indices = local_indices[sorted_indices]
+    remote_indices = remote_indices[sorted_indices]
+    local_diff = np.diff(local_indices)
+    remote_diff = np.diff(remote_indices)
+    breaks = np.where((local_diff != 1) | (remote_diff != 1))[0] + 1
+    segment_starts = np.concatenate(([0], breaks))
+    segment_ends = np.concatenate((breaks, [len(local_indices)]))
+    local_start = local_indices[segment_starts]
+    remote_start = remote_indices[segment_starts]
+    num_blocks = segment_ends - segment_starts
+    return local_start, remote_start, num_blocks
 
 
 class KVComm:
@@ -102,41 +118,43 @@ class KVComm:
             client, remote_base = self.get_client(addr)
             for rid, local_bid, remote_bid in request_info:
                 remaining = self.remaining_blocks[rid]
-                for layer in layers:
-                    remote_base_ptr = remote_base[layer]
-                    local_base_ptr = self.local_base[layer]
-                    for l_bid, r_bid in zip(local_bid, remote_bid):
+                local_start, remote_start, num_blocks = coalesce_indices(
+                    np.array(local_bid), np.array(remote_bid)
+                )
+                for l_start, r_start, num_blk in zip(local_start, remote_start, num_blocks):
+                    for layer in layers:
+                        remote_base_ptr = remote_base[layer]
+                        local_base_ptr = self.local_base[layer]
+                        remaining -= num_blk
                         client.send(
                             TensorBlock(
                                 local_base_ptr,
-                                l_bid * self.block_size,  # local offset
-                                self.block_size,  # size
+                                l_start * self.block_size,
+                                self.block_size * num_blk
                             ),
                             TensorBlock(
                                 remote_base_ptr,
-                                r_bid * self.block_size,  # local offset
-                                self.block_size,  # size
+                                r_start * self.block_size,
+                                self.block_size * num_blk
                             ),
-                            to_byte(rid),  # request id
-                            remaining - 1,  # remaining
+                            to_byte(rid),
+                            remaining
                         )
+                        remaining -= num_blk
                         client.send(
                             TensorBlock(
                                 local_base_ptr,
-                                self.kv_stride
-                                + l_bid * self.block_size,  # local offset
-                                self.block_size,  # size
+                                self.kv_stride + l_start * self.block_size,
+                                self.block_size * num_blk
                             ),
                             TensorBlock(
                                 remote_base_ptr,
-                                self.kv_stride
-                                + r_bid * self.block_size,  # local offset
-                                self.block_size,  # size
+                                self.kv_stride + r_start * self.block_size,
+                                self.block_size * num_blk
                             ),
-                            to_byte(rid),  # request id
-                            remaining - 2,  # remaining
+                            to_byte(rid),
+                            remaining
                         )
-                        remaining -= 2
                 self.remaining_blocks[rid] = remaining
 
     def wait_kv(self, request_id):
