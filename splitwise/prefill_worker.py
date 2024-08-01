@@ -41,10 +41,11 @@ async def prefill(request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     request_id = request_dict.pop("request_id")
     kv_addr = request_dict.pop("kv_addr")
+    block_ids = request_dict.pop("block_ids")
     sampling_params = SamplingParams(**request_dict)
 
     assert engine is not None
-    await call_kv_method(engine, "add_kv_addr", request_id, kv_addr)
+    await call_kv_method(engine, "add_request", request_id, kv_addr, block_ids)
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     blocks = []
@@ -57,7 +58,7 @@ async def prefill(request: Request) -> Response:
         blocks += final_output.blocks
     assert final_output is not None
     seq_group_data = await make_async(serialize_seq_group)(seq_group)
-    await call_kv_method(engine, "finish_push_kv", request_id)
+    await call_kv_method(engine, "wait_kv", request_id)
     free_blocks(blocks)
     return JSONResponse({"seq_group": seq_group_data})
 

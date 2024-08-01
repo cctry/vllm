@@ -37,11 +37,16 @@ class PrefillWorker:
         self.prefill_port = prefill_port
 
     async def start_prefill(
-        self, http_session: aiohttp.ClientSession, request, request_id
+        self,
+        http_session: aiohttp.ClientSession,
+        request,
+        request_id,
+        block_ids,
     ):
         prefill_request = {
             "request_id": request_id,
             "kv_addr": kv_addr,
+            "block_ids": block_ids,
             **request,
         }
         url = f"http://{self.prefill_addr}:{self.prefill_port}/prefill"
@@ -88,15 +93,6 @@ async def create_seq_group(
     return seq_group
 
 
-def pulling_KV(request_id, seq_group):
-    seq = seq_group.get_seqs()[0]
-    block_ids = block_manager.get_block_table(seq)
-    task = asyncio.create_task(
-        call_kv_method(engine, "add_request", request_id, block_ids)
-    )
-    return task
-
-
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
@@ -114,13 +110,14 @@ async def generate(request: Request) -> Response:
     sampling_params = SamplingParams(**request_dict)
     # create a dummy sequence group to reserve cache
     seq_group = await create_seq_group(request_id, prompt, sampling_params)
-    
-    with timer(f"[test] [{request_id}]") as t:
+    seq = seq_group.get_seqs()[0]
+    block_ids = block_manager.get_block_table(seq)
 
+    with timer(f"[test] [{request_id}]") as t:
         addr, host = get_prefill_worker()
         comm = PrefillWorker(addr, host)
         prefilled_seq = await comm.start_prefill(
-            http_session, request_info, request_id
+            http_session, request_info, request_id, block_ids
         )
         # We assume there is one sequence inside, the prompt
         dummy_seq = seq_group.get_seqs()[0]
@@ -129,8 +126,7 @@ async def generate(request: Request) -> Response:
         real_seq.status = SequenceStatus.RUNNING
 
         # wait for KV cache ready
-        await pulling_KV(request_id, seq_group)
-
+        await call_kv_method(engine, "wait_kv", request_id)
 
         decode_cm = t.record("Decode")
         decode_cm.__enter__()
@@ -145,7 +141,6 @@ async def generate(request: Request) -> Response:
             decode_cm.__enter__()
         decode_cm.__exit__(None, None, None)
         t.tagged_time["Decode"] /= t.tagged_count["Decode"] - 1
-
 
     assert final_output is not None
     prompt = final_output.prompt
