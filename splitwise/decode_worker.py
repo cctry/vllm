@@ -102,18 +102,22 @@ async def generate(request: Request) -> Response:
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
     request_info = await request.json()
+    message = request_info.pop('message', "")
     request_id = random_uuid()
     assert "request_id" not in request_info, "The request contains request ID"
     # copy the request
     request_dict = request_info.copy()
     prompt = request_dict.pop("prompt")
     sampling_params = SamplingParams(**request_dict)
-    # create a dummy sequence group to reserve cache
-    seq_group = await create_seq_group(request_id, prompt, sampling_params)
-    seq = seq_group.get_seqs()[0]
-    block_ids = block_manager.get_block_table(seq)
+    with timer(f"[test{message}] [{request_id}]") as t:
+        prefill_cm = t.record("Prefill")
+        decode_cm = t.record("Decode")
+        prefill_cm.__enter__()
+        # create a dummy sequence group to reserve cache
+        seq_group = await create_seq_group(request_id, prompt, sampling_params)
+        seq = seq_group.get_seqs()[0]
+        block_ids = block_manager.get_block_table(seq)
 
-    with timer(f"[test] [{request_id}]") as t:
         addr, host = get_prefill_worker()
         comm = PrefillWorker(addr, host)
         prefilled_seq = await comm.start_prefill(
@@ -127,8 +131,8 @@ async def generate(request: Request) -> Response:
 
         # wait for KV cache ready
         await call_kv_method(engine, "wait_kv", request_id)
+        prefill_cm.__exit__(None, None, None)
 
-        decode_cm = t.record("Decode")
         decode_cm.__enter__()
 
         # resume inference
@@ -162,12 +166,12 @@ async def run(config: uvicorn.Config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--port", type=int, default=8001)
-    parser.add_argument("--log-level", type=str, default="debug")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--log-level", type=str, default="info")
     parser.add_argument(
         "--model-path", type=str, default="/data/mistral-7b-instruct-v0_2"
     )
-    parser.add_argument("--alloc-timeout", type=int, default=10)
+    parser.add_argument("--alloc-timeout", type=int, default=600)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     args.model = args.model_path
@@ -191,4 +195,4 @@ if __name__ == "__main__":
         port=args.port,
         log_level=args.log_level,
     )
-    asyncio.run(run(config))
+    uvloop.run(run(config))

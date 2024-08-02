@@ -9,7 +9,7 @@ import uvicorn
 import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from utils import call_kv_method, serialize_seq_group
+from utils import call_kv_method, serialize_seq_group, make_done_callback
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -21,6 +21,7 @@ from vllm.utils import make_async
 engine = None
 app = FastAPI()
 client_session: aiohttp.ClientSession
+background_tasks: Set[asyncio.Task] = set()
 
 
 def free_blocks(blocks):
@@ -58,8 +59,15 @@ async def prefill(request: Request) -> Response:
         blocks += final_output.blocks
     assert final_output is not None
     seq_group_data = await make_async(serialize_seq_group)(seq_group)
-    await call_kv_method(engine, "wait_kv", request_id)
-    free_blocks(blocks)
+
+    task = asyncio.create_task(
+        call_kv_method(engine, "wait_kv", request_id)
+    )
+    task.add_done_callback(
+        make_done_callback(background_tasks, free_blocks, blocks)
+    )
+    background_tasks.add(task)
+
     return JSONResponse({"seq_group": seq_group_data})
 
 
@@ -78,7 +86,7 @@ async def run(config: uvicorn.Config):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--log-level", type=str, default="debug")
     parser.add_argument(
         "--model-path", type=str, default="/data/mistral-7b-instruct-v0_2"
@@ -107,4 +115,4 @@ if __name__ == "__main__":
         port=args.port,
         log_level=args.log_level,
     )
-    asyncio.run(run(config))
+    uvloop.run(run(config))

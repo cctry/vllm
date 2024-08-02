@@ -38,7 +38,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompt-length", type=int, required=True)
     parser.add_argument("--response-length", type=int, required=True)
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--qps", type=float, default=1)
     parser.add_argument("--num-request", type=int, default=10)
     parser.add_argument("--message", type=str, default="")
