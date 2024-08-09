@@ -11,7 +11,7 @@ import subprocess
 import time
 import zlib
 from contextlib import contextmanager
-from functools import partial
+from functools import lru_cache, partial
 from typing import Callable, Set
 
 import torch
@@ -19,6 +19,11 @@ import ucp
 
 from vllm.sequence import SequenceGroup
 from vllm.utils import make_async
+
+
+@lru_cache()
+def to_byte(s):
+    return s.encode("ascii")
 
 
 class Recorder:
@@ -187,7 +192,7 @@ def set_NIC(device_id, init_ucx=True):
     return addr
 
 
-async def call_kv_method(engine, method: str, *args, **kwargs):
+async def call_kv_method(engine, method: str, *args, lock=False, **kwargs):
     assert engine and engine.is_running, "Engine is not running"
     driver = engine.engine.model_executor.driver_worker
     coros = [make_async(driver.execute_kv_method)(method, *args, **kwargs)]
@@ -195,12 +200,15 @@ async def call_kv_method(engine, method: str, *args, **kwargs):
         workers = engine.engine.model_executor.workers
         coros += [
             asyncio.wrap_future(
-                worker.execute_kv_method.remote(
-                    method, *args, **kwargs
-                ).future()
-            )
+                worker.execute_kv_method.options(
+                    concurrency_group="lock"
+                ).remote(method, *args, **kwargs)
+                if lock
+                else worker.execute_kv_method.remote(method, *args, **kwargs)
+            ).future()
             for worker in workers
         ]
+
     return await asyncio.gather(*coros)
 
 

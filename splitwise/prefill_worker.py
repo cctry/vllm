@@ -58,6 +58,7 @@ async def prefill(request: Request) -> Response:
         seq_group = final_output.seq_group
         blocks += final_output.blocks
     assert final_output is not None
+    seq_group.block_ids = [block.block_number for block in blocks] # send block ID to decode
     seq_group_data = await make_async(serialize_seq_group)(seq_group)
 
     task = asyncio.create_task(
@@ -66,7 +67,7 @@ async def prefill(request: Request) -> Response:
     task.add_done_callback(
         make_done_callback(background_tasks, free_blocks, blocks)
     )
-    background_tasks.add(task)
+    background_tasks.add(task) # free blocks after finishing push
 
     return JSONResponse({"seq_group": seq_group_data})
 

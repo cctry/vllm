@@ -1,188 +1,159 @@
-import asyncio
+import time
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
-import block_copy
+import numpy as np
 import torch
-import torch.multiprocessing as mp
-import ucp
 import utils
-import os
-import struct
-import rdma_transport
+from rdma_transport import (
+    TensorBlock,
+    TensorBlocks,
+    VllmRdmaClient,
+    VllmRdmaServer,
+)
+
+KV_TIMEOUT = 30
 
 
-def serialize_int_list(int_list):
-    byte_array = bytearray(len(int_list) * 4)
-    for i, number in enumerate(int_list):
-        struct.pack_into("i", byte_array, i * 4, number)
-    return byte_array
+def coalesce_indices(local_indices, remote_indices):
+    sorted_indices = np.argsort(local_indices)
+    local_indices = local_indices[sorted_indices]
+    remote_indices = remote_indices[sorted_indices]
+    local_diff = np.diff(local_indices)
+    remote_diff = np.diff(remote_indices)
+    breaks = np.where((local_diff != 1) | (remote_diff != 1))[0] + 1
+    segment_starts = np.concatenate(([0], breaks))
+    segment_ends = np.concatenate((breaks, [len(local_indices)]))
+    local_start = local_indices[segment_starts]
+    remote_start = remote_indices[segment_starts]
+    num_blocks = segment_ends - segment_starts
+    return local_start, remote_start, num_blocks
 
 
-def deserialize_bytearray(byte_array):
-    int_list = [
-        struct.unpack_from("i", byte_array, i * 4)[0]
-        for i in range(len(byte_array) // 4)
-    ]
-    return int_list
-
-
-def get_blk_seq(start, num, length):
-    lst = list(range(start, start + num)) + [-1] * (length - num)
-    return serialize_int_list(lst)
-
-def from_blk_seq(blk_seq):
-    lst = deserialize_bytearray(blk_seq)
-    return [x for x in lst if x != -1]
-
-
-def parse_metadata(data):
-    request_id = data[:32].decode('utf-8')
-    bid = from_blk_seq(data[32:])
-    return request_id, bid
-
-class KVComm(mp.Process):
+class KVComm:
     def __init__(
         self,
-        device: torch.device,
-        dtype: torch.dtype,
-        shape: tuple,
+        cache: List[torch.Tensor],
+        local_addr: str,
         role: str,
-        requests_queue: mp.Queue,
-        flags: dict,
-        buffer_size: int,
-        local_addr=None,
     ):
-        super().__init__(name=f"KVComm:{device.index}")
-        self.role = role
-        self.device = device
-        self.dtype = dtype
-        self.requests_queue = requests_queue
+        self.cache = cache
+        self.rank = cache[0].device.index
+        self.device_id = utils.get_real_device_id(self.rank)
         self.local_addr = local_addr
-        self.flags = flags
-        assert role == "server" or flags is not None
-        self.block_shape = shape
-        self.block_size = shape[0] * shape[1] * shape[2] * dtype.itemsize
-        self.buffer_size = buffer_size
-        self.num_packing_blocks = self.buffer_size // self.block_size
-        assert self.buffer_size % self.block_size == 0
-        assert self.num_packing_blocks != 0
-        if role == "client":
-            self.clients = {}
+        self.num_layer = len(cache)
+        self.shape = tuple(cache[0].shape)
+        self.block_size = (
+            self.shape[-1]
+            * self.shape[-2]
+            * self.shape[-3]
+            * cache[0].dtype.itemsize
+        )  # in bytes
+        self.local_base = [t.data_ptr() for t in cache]
+        self.kv_stride = cache[0].stride()[0]
 
-    async def _kv_server_handler(self, ep: ucp.Endpoint):
-        id_buffer = await ep.am_recv()
-        request_id = id_buffer.decode("utf-8")
-        while request_id not in self.pending_requests:
-            await asyncio.sleep(0)
-        tensor_data = self.pending_requests.pop(request_id)
-        blocks = [func(*args) for (func, args) in tensor_data]
-        remaining = len(blocks)
-        buffer = self.get_buffer() # This buffer may from Rust
-        while remaining > 0:
-            blk_seq = await ep.am_recv() # Notified with the sent blocks
-            await ep.recv(buffer) # Buffer is written
-            idx = from_blk_seq(blk_seq)
-            blks = [blocks[i] for i in idx] # Figure out the addresses
-            self.block_copy.scatter(blks, buffer) # Scatter
-            remaining -= len(blks)
-        self.flags[request_id] = True
-        await ep.close()
-
-    def kv_server(self):
-        """The server will listen for KV blocks"""
-
-        async def _kv_server():
-            self.pending_requests = {}
-            self.server = rdma_transport.RdmaServer(self.server_addr, self.device.index)
+        self.tensor_blocks = TensorBlocks()
+        for c in cache:
+            self.tensor_blocks.add(
+                TensorBlock(c.data_ptr(), 0, c.numel() * c.element_size())
+            )
+        self.role = role
+        if role == "server":
+            self.server = VllmRdmaServer(
+                self.local_addr, self.device_id, self.tensor_blocks
+            )
             self.server.listen()
-            self.remaining_blks = {}
-            while True:
-                msg = await self.server.recv_message()
-                assert msg is not None
-                buffer = msg.get_buffer()
-                metadata = msg.get_data()
-                request_id, block_id = parse_metadata(metadata)
-                while not self.requests_queue.empty():
-                    request_id, tensor_data = self.requests_queue.get()
-                    blocks = [func(*args) for (func, args) in tensor_data]
-                    self.pending_requests[request_id] = blocks
-                    self.remaining_blks[request_id] = len(blocks)
-                assert request_id in self.pending_requests
-                blocks = self.pending_requests[request_id]
-                blks = [blocks[i] for i in block_id] # Figure out the addresses
-                self.block_copy.scatter_ptr(blks, buffer) # Scatter
-                self.remaining_blks[request_id] -= len(blks)
-                if self.remaining_blks[request_id] == 0:
-                    self.flags[request_id] = True
+        elif role == "client":
+            self.clients = {}
+            self.remote_base_ptr = {}
+        self.pending_requests = {}
+        self.remaining_blocks = {}
 
-        try:
-            asyncio.run(_kv_server())
-        except Exception as e:
-            raise e
-        finally:
-            self.lf.close()
-
-    async def _kv_push(self, host, port, request_id, tensor_queue):
-        server_addr = f"{host}:{port}"
-        if server_addr not in server_addr:
-            client = rdma_transport.RdmaClient(self.local_addr, self.device.index)
-            client.connect(server_addr)
+    def get_client(self, server_addr):
+        if server_addr not in self.clients:
+            client = VllmRdmaClient(
+                self.local_addr, self.device_id, self.tensor_blocks
+            )
+            remote_tb: TensorBlocks = client.connect(server_addr)
             self.clients[server_addr] = client
+            remote_base_ptr = remote_tb.get_base_ptrs()
+            self.remote_base_ptr[server_addr] = remote_base_ptr
         else:
             client = self.clients[server_addr]
-        count = 0
-        while True:
-            tensor_data = await tensor_queue.get()
-            if tensor_data is None:
-                break
-            buffer = self.client.get_buffer()
-            blocks = [func(*args) for (func, args) in tensor_data]
-            for blks in utils.chunk(blocks, self.num_packing_blocks):
-                blk_seq = get_blk_seq(count, len(blks), self.num_packing_blocks)
-                metadata = bytearray(request_id) + blk_seq
-                self.block_copy.gather_ptr(buffer, blks) # Gather blocks to buffer
-                client.send(0, self.buffer_size, metadata)
-                count += len(blks)
-        self.flags[request_id] = True
+            remote_base_ptr = self.remote_base_ptr[server_addr]
+        return client, remote_base_ptr
 
-    def kv_client(self):
-        """The server will send KV blocks"""
+    def add_request(
+        self, request_id: str, server_addr: str, block_ids: List[int]
+    ):
+        assert request_id not in self.pending_requests
+        self.pending_requests[request_id] = (server_addr, block_ids)
+        self.remaining_blocks[request_id] = len(block_ids) * self.num_layer * 2
+        _ = self.get_client(server_addr)
 
-        async def _kv_client():
-            tasks = {}
-            while True:
-                if not self.requests_queue.empty():
-                    request_id, host, port, tensor_data = (
-                        self.requests_queue.get(True)
-                    )
-                    if request_id not in tasks:
-                        queue = asyncio.Queue()
-                        task = asyncio.create_task(
-                            self._kv_push(host, port, request_id, queue),
-                            name=request_id,
+    def transfer_kv(
+        self,
+        request_ids: List[str],
+        local_block_ids: List[List[int]],
+        layers: List[int],
+        action: str,
+    ):
+        requests = defaultdict(list)
+        for rid, local_bid in zip(request_ids, local_block_ids):
+            addr, remote_bid = self.pending_requests[rid]
+            requests[addr].append((rid, local_bid, remote_bid))
+
+        for addr, request_info in requests.items():
+            client, remote_base = self.get_client(addr)
+            func = client.send if action == 'push' else client.recv
+            for rid, local_bid, remote_bid in request_info:
+                remaining = self.remaining_blocks[rid]
+                if remaining == 0:
+                    client.complete(rid)
+                local_start, remote_start, num_blocks = coalesce_indices(
+                    np.array(local_bid), np.array(remote_bid)
+                )
+                for l_start, r_start, num_blk in zip(
+                    local_start, remote_start, num_blocks
+                ):
+                    for layer in layers:
+                        remote_base_ptr = remote_base[layer]
+                        local_base_ptr = self.local_base[layer]
+                        remaining -= 2 * num_blk
+                        func(
+                            TensorBlock(
+                                local_base_ptr,
+                                l_start * self.block_size,
+                                self.block_size * num_blk,
+                            ),
+                            TensorBlock(
+                                remote_base_ptr,
+                                r_start * self.block_size,
+                                self.block_size * num_blk,
+                            ),
                         )
-                        tasks[request_id] = (task, queue)
-                        task.add_done_callback(
-                            lambda task: tasks.pop(task.get_name())
+                        func(
+                            TensorBlock(
+                                local_base_ptr,
+                                self.kv_stride + l_start * self.block_size,
+                                self.block_size * num_blk,
+                            ),
+                            TensorBlock(
+                                remote_base_ptr,
+                                self.kv_stride + r_start * self.block_size,
+                                self.block_size * num_blk,
+                            ),
                         )
-                    tasks[request_id][1].put_nowait(tensor_data)
-                await asyncio.sleep(0.1)
-        # TODO: try and shutdown
-        asyncio.run(_kv_client())
-
-    def get_buffer(self) -> torch.Tensor:
-        # TODO: We can use double buffer here
-        buffer = torch.empty(
-            (self.num_packing_blocks, *self.block_shape),
-            device=self.device,
-            dtype=self.dtype,
-        )
-        return utils.wrap_tensor(buffer)
-
-    def run(self):
-        torch.cuda.init()
-        self.block_copy = block_copy.get_block_copy(
-            self.num_packing_blocks, self.block_size
-        )
-        utils.set_NIC(self.device.index)
-        method_map = {"server": self.kv_server, "client": self.kv_client}
-        method_map[self.role]()
+                self.remaining_blocks[rid] = remaining
+        
+    def wait_kv(self, request_id):
+        if self.role == "server":
+            handle = self.server
+        elif self.role == "client":
+            addr, _ = self.pending_requests[request_id]
+            handle = self.clients[addr]
+        start = time.time()
+        while handle.is_complete(utils.to_byte(request_id)) is None:
+            if time.time() - start > KV_TIMEOUT:
+                raise TimeoutError(f"KV cache pull for {request_id} timeout")
+            time.sleep(1 / 1000)
