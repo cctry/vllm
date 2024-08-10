@@ -1,37 +1,43 @@
-from kv_comm import KVComm
-import asyncio
 import random
 from itertools import accumulate
 
 import torch
 import utils
+from kv_comm import KVComm
 
 from vllm.worker.worker import Worker
 
 
-
-class WorkerSplitwise(Worker):
-    def setup(self):
+class SplitWorkerBase(Worker):
+    def setup(self, role):
         # Assume all tensors are the same
         cache = self.gpu_cache[0]
         assert self.local_rank == cache.device.index
         info = utils.detect_NIC(self.local_rank)
-        addr = info["address"]
+        addr = f'{info["address"]}:{random.randint(40000, 60000)}'
+        self.kv_comm = KVComm(self.gpu_cache, addr, role)
         return addr
 
-    def decode_kv_init(self, port: int):
+    def wait_kv(self, request_id: str):
+        """Wait for kv comm to finish."""
+        self.kv_comm.wait_kv(request_id)  # block here
+
+    def add_request(self, request_id, kv_addr, block_ids):
+        info = next(
+            info for info in kv_addr if info["device"] == self.local_rank
+        )
+        self.kv_comm.add_request(request_id, info["addr"], block_ids)
+
+
+class WorkerPush(SplitWorkerBase):
+    def decode_kv_init(self):
         """Initialize the KV cache communicator as the decode worker"""
-        host = self.setup()
-        self.port = port + self.local_rank
-        addr = f"{host}:{self.port}"
-        self.kv_comm = KVComm(self.gpu_cache, addr, "server")
-        return {"device": self.local_rank, "host": host, "port": self.port}
+        addr = self.setup("server")
+        return {"device": self.local_rank, "addr": addr}
 
     def prefill_kv_init(self, layer_wise=-1):
         """Initialize the KV cache communicator as the prefill worker"""
-        host = self.setup()
-        port = random.randint(40000, 60000)
-        self.kv_comm = KVComm(self.gpu_cache, f"{host}:{port}", "client")
+        addr = self.setup("client")
 
         layers = self.model_runner.model.model.layers
         block_size = self.model_runner.block_size
@@ -64,7 +70,9 @@ class WorkerSplitwise(Worker):
                 block_ids = [
                     torch.unique_consecutive(bid).tolist() for bid in block_ids
                 ]
-                self.kv_comm.transfer_kv(args[3].request_ids, block_ids, layers, "push")
+                self.kv_comm.transfer_kv(
+                    args[3].request_ids, block_ids, layers, "push"
+                )
 
                 return output
 
@@ -73,16 +81,24 @@ class WorkerSplitwise(Worker):
         for i, layer in enumerate(layers):
             layer.forward = forward_wrapper(i, layer)
 
-        return {"device": self.local_rank, "host": host}
+        return {"device": self.local_rank, "addr": addr}
 
-    def wait_kv(self, request_id: str):
-        """Wait for kv comm to finish."""
-        self.kv_comm.wait_kv(request_id)  # block here
 
-    def add_request(self, request_id, kv_addr, block_ids):
-        info = next(
-            info for info in kv_addr if info["device"] == self.local_rank
-        )
-        self.kv_comm.add_request(
-            request_id, f"{info['host']}:{info['port']}", block_ids
+class WorkerPull(SplitWorkerBase):
+    def decode_kv_init(self):
+        addr = self.setup("client")
+        return {"device": self.local_rank, "addr": addr}
+
+    def prefill_kv_init(self, layer_wise=-1):
+        addr = self.setup("server")
+        return {"device": self.local_rank, "addr": addr}
+
+    def pull_kv(self, request_id, local_block_ids):
+        """ This function is non-blocking
+        """
+        self.kv_comm.transfer_kv(
+            [request_id],
+            [local_block_ids],
+            list(range(len(self.gpu_cache))),
+            "pull"
         )

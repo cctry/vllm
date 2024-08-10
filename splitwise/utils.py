@@ -51,13 +51,14 @@ class Recorder:
 
 
 @contextmanager
-def timer(desc):
+def timer(desc, enable = True):
     t = Recorder(desc)
     start = time.time()
     yield t
     end = time.time()
-    print(f"{desc}: {end - start}")
-    t.show()
+    if enable:
+        print(f"{desc}: {end - start}")
+        t.show()
 
 
 def chunk(lst, chunk_size):

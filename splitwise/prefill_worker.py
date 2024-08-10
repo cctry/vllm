@@ -46,7 +46,11 @@ async def prefill(request: Request) -> Response:
     sampling_params = SamplingParams(**request_dict)
 
     assert engine is not None
-    await call_kv_method(engine, "add_request", request_id, kv_addr, block_ids, lock=True)
+
+    if args.transfer_mode == "push":
+        await call_kv_method(
+            engine, "add_request", request_id, kv_addr, block_ids, lock=True
+        )
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     blocks = []
@@ -58,18 +62,21 @@ async def prefill(request: Request) -> Response:
         seq_group = final_output.seq_group
         blocks += final_output.blocks
     assert final_output is not None
-    seq_group.block_ids = [block.block_number for block in blocks] # send block ID to decode
     seq_group_data = await make_async(serialize_seq_group)(seq_group)
 
-    task = asyncio.create_task(
-        call_kv_method(engine, "wait_kv", request_id)
-    )
+    task = asyncio.create_task(call_kv_method(engine, "wait_kv", request_id))
     task.add_done_callback(
         make_done_callback(background_tasks, free_blocks, blocks)
     )
-    background_tasks.add(task) # free blocks after finishing push
+    background_tasks.add(task)  # free blocks after finishing transfer
 
-    return JSONResponse({"seq_group": seq_group_data})
+    return JSONResponse(
+        {
+            "seq_group": seq_group_data,
+            "block_id": [block.block_number for block in blocks],
+            "kv_addr": kv_info
+        }
+    )
 
 
 async def run(config: uvicorn.Config):
@@ -88,7 +95,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=8001)
-    parser.add_argument("--log-level", type=str, default="debug")
+    parser.add_argument("--log-level", type=str, default="info")
     parser.add_argument(
         "--model-path", type=str, default="/data/mistral-7b-instruct-v0_2"
     )
@@ -100,12 +107,14 @@ if __name__ == "__main__":
     args.disable_custom_all_reduce = True
     args.engine_use_ray = False
     args.worker_use_ray = True
+    args.enable_chunked_prefill = False
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     os.environ["RAY_NUM_CPUS"] = "64"
     os.environ["WORKER_MODULE"] = "worker"
-    os.environ["WORKER_CLASS"] = "WorkerSplitwise"
-
+    os.environ["WORKER_CLASS"] = (
+        "WorkerPull" if args.transfer_mode == "pull" else "WorkerPush"
+    )
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.API_SERVER
     )

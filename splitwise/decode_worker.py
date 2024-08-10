@@ -53,7 +53,7 @@ class PrefillWorker:
         async with http_session.post(url, json=prefill_request) as response:
             response.raise_for_status()
             data = await response.json()
-            return await make_async(deserialize_seq_group)(data["seq_group"])
+            return data
 
 
 def resume_request(request_id: str, seq_group: SequenceGroup):
@@ -102,7 +102,7 @@ async def generate(request: Request) -> Response:
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
     request_info = await request.json()
-    message = request_info.pop('message', "")
+    message = request_info.pop("message", "")
     request_id = random_uuid()
     assert "request_id" not in request_info, "The request contains request ID"
     # copy the request
@@ -120,14 +120,34 @@ async def generate(request: Request) -> Response:
 
         addr, host = get_prefill_worker()
         comm = PrefillWorker(addr, host)
-        prefilled_seq = await comm.start_prefill(
+        data = await comm.start_prefill(
             http_session, request_info, request_id, block_ids
         )
+        prefilled_seq = await make_async(deserialize_seq_group)(
+            data["seq_group"]
+        )
+        remote_block_id = data["block_id"]
         # We assume there is one sequence inside, the prompt
         dummy_seq = seq_group.get_seqs()[0]
         real_seq = prefilled_seq.get_seqs()[0]
         real_seq.seq_id = dummy_seq.seq_id
         real_seq.status = SequenceStatus.RUNNING
+
+        if args.transfer_mode == "pull":
+            await call_kv_method(
+                engine,
+                "add_request",
+                request_id,
+                kv_addr,
+                remote_block_id,
+                lock=True,
+            )
+            await call_kv_method(
+                engine,
+                "pull_kv",
+                request_id,
+                block_ids
+            )
 
         # wait for KV cache ready
         await call_kv_method(engine, "wait_kv", request_id)
@@ -157,7 +177,7 @@ async def run(config: uvicorn.Config):
     engine.start_background_loop()
     scheduler = engine.engine.scheduler
     block_manager = scheduler.block_manager
-    kv_addr = await call_kv_method(engine, "decode_kv_init", 13337)
+    kv_addr = await call_kv_method(engine, "decode_kv_init")
     http_session = aiohttp.ClientSession()
     server = uvicorn.Server(config=config)
     await server.serve()
@@ -172,6 +192,9 @@ if __name__ == "__main__":
         "--model-path", type=str, default="/data/mistral-7b-instruct-v0_2"
     )
     parser.add_argument("--alloc-timeout", type=int, default=600)
+    parser.add_argument(
+        "--transfer-mode", type=str, choices=["pull", "push"], default="pull"
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     args.model = args.model_path
@@ -179,11 +202,14 @@ if __name__ == "__main__":
     args.disable_custom_all_reduce = True
     args.engine_use_ray = False
     args.worker_use_ray = True
+    args.enable_chunked_prefill = False
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
     os.environ["RAY_NUM_CPUS"] = "64"
     os.environ["WORKER_MODULE"] = "worker"
-    os.environ["WORKER_CLASS"] = "WorkerSplitwise"
+    os.environ["WORKER_CLASS"] = (
+        "WorkerPull" if args.transfer_mode == "pull" else "WorkerPush"
+    )
 
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.API_SERVER
