@@ -74,7 +74,7 @@ async def prefill(request: Request) -> Response:
         {
             "seq_group": seq_group_data,
             "block_id": [block.block_number for block in blocks],
-            "kv_addr": kv_info
+            "kv_addr": kv_info,
         }
     )
 
@@ -100,6 +100,9 @@ if __name__ == "__main__":
         "--model-path", type=str, default="/data/mistral-7b-instruct-v0_2"
     )
     parser.add_argument("--num-layer-per-push", type=int, default=8)
+    parser.add_argument(
+        "--transfer-mode", type=str, choices=["pull", "push"], default="pull"
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     args.model = args.model_path

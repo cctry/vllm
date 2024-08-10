@@ -93,6 +93,57 @@ async def create_seq_group(
     return seq_group
 
 
+def map_prefilled_seq_group(prefilled, dummy):
+    # We assume there is one sequence inside, the prompt
+    dummy_seq = dummy.get_seqs()[0]
+    real_seq = prefilled.get_seqs()[0]
+    real_seq.seq_id = dummy_seq.seq_id
+    real_seq.status = SequenceStatus.RUNNING
+
+
+async def prefill_push(comm, request_info, request_id):
+    # copy the request
+    request_dict = request_info.copy()
+    prompt = request_dict.pop("prompt")
+    sampling_params = SamplingParams(**request_dict)
+    # create a dummy sequence group to reserve cache
+    seq_group = await create_seq_group(request_id, prompt, sampling_params)
+    seq = seq_group.get_seqs()[0]
+    block_ids = block_manager.get_block_table(seq)
+    data = await comm.start_prefill(
+        http_session, request_info, request_id, block_ids
+    )
+    prefilled_seq = await make_async(deserialize_seq_group)(data["seq_group"])
+    map_prefilled_seq_group(prefilled_seq, seq_group)
+    return prefilled_seq
+
+
+async def prefill_pull(comm, request_info, request_id):
+    # copy the request
+    request_dict = request_info.copy()
+    prompt = request_dict.pop("prompt")
+    sampling_params = SamplingParams(**request_dict)
+    data = await comm.start_prefill(http_session, request_info, request_id, [])
+    prefilled_seq = await make_async(deserialize_seq_group)(data["seq_group"])
+    remote_block_id = data["block_id"]
+    # create a dummy sequence group to reserve cache
+    seq_group = await create_seq_group(request_id, prompt, sampling_params)
+    seq = seq_group.get_seqs()[0]
+    local_block_ids = block_manager.get_block_table(seq)
+    map_prefilled_seq_group(prefilled_seq, seq_group)
+    # start to pull KV cache
+    await call_kv_method(
+        engine,
+        "add_request",
+        request_id,
+        kv_addr,
+        remote_block_id,
+        lock=True,
+    )
+    await call_kv_method(engine, "pull_kv", request_id, local_block_ids)
+    return prefilled_seq
+
+
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     """Generate completion for the request.
@@ -105,49 +156,20 @@ async def generate(request: Request) -> Response:
     message = request_info.pop("message", "")
     request_id = random_uuid()
     assert "request_id" not in request_info, "The request contains request ID"
-    # copy the request
-    request_dict = request_info.copy()
-    prompt = request_dict.pop("prompt")
-    sampling_params = SamplingParams(**request_dict)
+
+    # Get a prefill worker
+    addr, host = get_prefill_worker()
+    comm = PrefillWorker(addr, host)
+
     with timer(f"[test{message}] [{request_id}]") as t:
         prefill_cm = t.record("Prefill")
         decode_cm = t.record("Decode")
         prefill_cm.__enter__()
-        # create a dummy sequence group to reserve cache
-        seq_group = await create_seq_group(request_id, prompt, sampling_params)
-        seq = seq_group.get_seqs()[0]
-        block_ids = block_manager.get_block_table(seq)
 
-        addr, host = get_prefill_worker()
-        comm = PrefillWorker(addr, host)
-        data = await comm.start_prefill(
-            http_session, request_info, request_id, block_ids
-        )
-        prefilled_seq = await make_async(deserialize_seq_group)(
-            data["seq_group"]
-        )
-        remote_block_id = data["block_id"]
-        # We assume there is one sequence inside, the prompt
-        dummy_seq = seq_group.get_seqs()[0]
-        real_seq = prefilled_seq.get_seqs()[0]
-        real_seq.seq_id = dummy_seq.seq_id
-        real_seq.status = SequenceStatus.RUNNING
-
-        if args.transfer_mode == "pull":
-            await call_kv_method(
-                engine,
-                "add_request",
-                request_id,
-                kv_addr,
-                remote_block_id,
-                lock=True,
-            )
-            await call_kv_method(
-                engine,
-                "pull_kv",
-                request_id,
-                block_ids
-            )
+        if args.transfer_mode == "push":
+            seq_group = await prefill_push(comm, request_info, request_id)
+        elif args.transfer_mode == 'pull':
+            seq_group = await prefill_pull(comm, request_info, request_id)
 
         # wait for KV cache ready
         await call_kv_method(engine, "wait_kv", request_id)
@@ -156,7 +178,7 @@ async def generate(request: Request) -> Response:
         decode_cm.__enter__()
 
         # resume inference
-        stream = resume_request(request_id, prefilled_seq)
+        stream = resume_request(request_id, seq_group)
         final_output = None
         async for request_output in stream:
             decode_cm.__exit__(None, None, None)
