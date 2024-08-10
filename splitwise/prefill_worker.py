@@ -46,7 +46,7 @@ async def prefill(request: Request) -> Response:
     sampling_params = SamplingParams(**request_dict)
 
     assert engine is not None
-    await call_kv_method(engine, "add_request", request_id, kv_addr, block_ids)
+    await call_kv_method(engine, "add_request", request_id, kv_addr, block_ids, lock=True)
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     blocks = []

@@ -195,19 +195,17 @@ def set_NIC(device_id, init_ucx=True):
 async def call_kv_method(engine, method: str, *args, lock=False, **kwargs):
     assert engine and engine.is_running, "Engine is not running"
     driver = engine.engine.model_executor.driver_worker
-    coros = [make_async(driver.execute_kv_method)(method, *args, **kwargs)]
+    coros = [make_async(driver.execute_method)(method, *args, **kwargs)]
     if hasattr(engine.engine.model_executor, "workers"):
         workers = engine.engine.model_executor.workers
-        coros += [
-            asyncio.wrap_future(
-                worker.execute_kv_method.options(
-                    concurrency_group="lock"
-                ).remote(method, *args, **kwargs)
-                if lock
-                else worker.execute_kv_method.remote(method, *args, **kwargs)
-            ).future()
-            for worker in workers
-        ]
+        group = "lock" if lock else "kv"
+        for worker in workers:
+            future = asyncio.wrap_future(
+                worker.execute_method.options(concurrency_group=group)
+                .remote(method, *args, **kwargs)
+                .future()
+            )
+            coros.append(future)
 
     return await asyncio.gather(*coros)
 
