@@ -21,6 +21,8 @@ from vllm.sequence import SequenceGroup, SequenceStatus
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import make_async, random_uuid
 
+from Allocator import BlockAllocator
+
 # global states for this perfill worker
 engine: AsyncLLMEngine
 block_manager: BlockSpaceManager
@@ -81,19 +83,23 @@ async def create_seq_group(
     # remove it from the scheduler
     seq_group = scheduler.waiting.pop()
     # reserve cache blocks
-    # start_time = time.time()
-    # while time.time() - start_time < args.alloc_timeout:
-    #     can_allocate = block_manager.can_allocate(seq_group)
-    #     if can_allocate == AllocStatus.OK:
-    #         scheduler._allocate_and_set_running(seq_group)
-    #         break
-    #     elif can_allocate == AllocStatus.LATER:
-    #         await asyncio.sleep(0.1)
-    #     else:
-    #         raise RuntimeError(f"Prompt is too long for {request_id}")
-    # else:
-    #     raise TimeoutError(f"No enough cache blocks for {request_id}")
-    await asyncio.wait_for(allocator.acquire(arrival_time, seq_group), args.alloc_timeout)
+    if args.force_fifo:
+        await asyncio.wait_for(
+            allocator.acquire(arrival_time, seq_group), args.alloc_timeout
+        )
+    else:
+        start_time = time.time()
+        while time.time() - start_time < args.alloc_timeout:
+            can_allocate = block_manager.can_allocate(seq_group)
+            if can_allocate == AllocStatus.OK:
+                scheduler._allocate_and_set_running(seq_group)
+                break
+            elif can_allocate == AllocStatus.LATER:
+                await asyncio.sleep(0.1)
+            else:
+                raise RuntimeError(f"Prompt is too long for {request_id}")
+        else:
+            raise TimeoutError(f"No enough cache blocks for {request_id}")
     return seq_group
 
 
@@ -104,9 +110,11 @@ def map_prefilled_seq_group(prefilled, dummy):
     real_seq.seq_id = dummy_seq.seq_id
     real_seq.status = SequenceStatus.RUNNING
 
+
 def get_block_id(seq_group: SequenceGroup):
     seq = seq_group.get_seqs()[0]
     return block_manager.get_block_table(seq)
+
 
 async def prefill_push(comm, request_info, request_id):
     # copy the request
@@ -142,7 +150,7 @@ async def prefill_pull(comm, request_info, request_id):
         engine,
         "add_request",
         request_id,
-        data['kv_addr'],
+        data["kv_addr"],
         remote_block_id,
         lock=True,
     )
@@ -174,7 +182,7 @@ async def generate(request: Request) -> Response:
 
         if args.transfer_mode == "push":
             seq_group = await prefill_push(comm, request_info, request_id)
-        elif args.transfer_mode == 'pull':
+        elif args.transfer_mode == "pull":
             seq_group = await prefill_pull(comm, request_info, request_id)
 
         # wait for KV cache ready
@@ -199,7 +207,7 @@ async def generate(request: Request) -> Response:
     text = [prompt + output.text for output in final_output.outputs]
     return JSONResponse({"request_id": request_id, "text": text})
 
-from Allocator import BlockAllocator
+
 async def run(config: uvicorn.Config):
     global http_session, engine, block_manager, scheduler, kv_addr, allocator
     engine.start_background_loop()
@@ -208,7 +216,8 @@ async def run(config: uvicorn.Config):
     kv_addr = await call_kv_method(engine, "decode_kv_init")
     http_session = aiohttp.ClientSession()
     server = uvicorn.Server(config=config)
-    allocator = BlockAllocator(block_manager, scheduler)
+    if args.force_fifo:
+        allocator = BlockAllocator(block_manager, scheduler)
     await server.serve()
 
 
@@ -224,6 +233,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--transfer-mode", type=str, choices=["pull", "push"], default="pull"
     )
+    parser.add_argument("--force-fifo", action="store_true")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     args.model = args.model_path
