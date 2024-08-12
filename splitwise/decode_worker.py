@@ -81,18 +81,19 @@ async def create_seq_group(
     # remove it from the scheduler
     seq_group = scheduler.waiting.pop()
     # reserve cache blocks
-    start_time = time.time()
-    while time.time() - start_time < args.alloc_timeout:
-        can_allocate = block_manager.can_allocate(seq_group)
-        if can_allocate == AllocStatus.OK:
-            break
-        elif can_allocate == AllocStatus.LATER:
-            await asyncio.sleep(0.1)
-        else:
-            raise RuntimeError(f"Prompt is too long for {request_id}")
-    else:
-        raise TimeoutError(f"No enough cache blocks for {request_id}")
-    scheduler._allocate_and_set_running(seq_group)
+    # start_time = time.time()
+    # while time.time() - start_time < args.alloc_timeout:
+    #     can_allocate = block_manager.can_allocate(seq_group)
+    #     if can_allocate == AllocStatus.OK:
+    #         scheduler._allocate_and_set_running(seq_group)
+    #         break
+    #     elif can_allocate == AllocStatus.LATER:
+    #         await asyncio.sleep(0.1)
+    #     else:
+    #         raise RuntimeError(f"Prompt is too long for {request_id}")
+    # else:
+    #     raise TimeoutError(f"No enough cache blocks for {request_id}")
+    await asyncio.wait_for(allocator.acquire(arrival_time, seq_group), args.alloc_timeout)
     return seq_group
 
 
@@ -198,15 +199,16 @@ async def generate(request: Request) -> Response:
     text = [prompt + output.text for output in final_output.outputs]
     return JSONResponse({"request_id": request_id, "text": text})
 
-
+from Allocator import BlockAllocator
 async def run(config: uvicorn.Config):
-    global http_session, engine, block_manager, scheduler, kv_addr
+    global http_session, engine, block_manager, scheduler, kv_addr, allocator
     engine.start_background_loop()
     scheduler = engine.engine.scheduler
     block_manager = scheduler.block_manager
     kv_addr = await call_kv_method(engine, "decode_kv_init")
     http_session = aiohttp.ClientSession()
     server = uvicorn.Server(config=config)
+    allocator = BlockAllocator(block_manager, scheduler)
     await server.serve()
 
 

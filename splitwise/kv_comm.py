@@ -71,9 +71,7 @@ class KVComm:
 
     def get_client(self, server_addr):
         if server_addr not in self.clients:
-            client = VllmRdmaClient(
-                self.local_addr, self.device_id, self.tensor_blocks
-            )
+            client = VllmRdmaClient(self.device_id, self.tensor_blocks)
             remote_tb: TensorBlocks = client.connect(server_addr)
             self.clients[server_addr] = client
             remote_base_ptr = remote_tb.get_base_ptrs()
@@ -105,7 +103,7 @@ class KVComm:
 
         for addr, request_info in requests.items():
             client, remote_base = self.get_client(addr)
-            func = client.send if action == 'push' else client.recv
+            func = client.send if action == "push" else client.recv
             for rid, local_bid, remote_bid in request_info:
                 remaining = self.remaining_blocks[rid]
                 if remaining == 0:
@@ -145,7 +143,7 @@ class KVComm:
                             ),
                         )
                 self.remaining_blocks[rid] = remaining
-        
+
     def wait_kv(self, request_id):
         if self.role == "server":
             handle = self.server
