@@ -86,7 +86,10 @@ async def create_seq_group(
         can_allocate = block_manager.can_allocate(seq_group)
         if can_allocate == AllocStatus.OK:
             break
-        await asyncio.sleep(0.1)
+        elif can_allocate == AllocStatus.LATER:
+            await asyncio.sleep(0.1)
+        else:
+            raise RuntimeError(f"Prompt is too long for {request_id}")
     else:
         raise TimeoutError(f"No enough cache blocks for {request_id}")
     scheduler._allocate_and_set_running(seq_group)
@@ -100,6 +103,9 @@ def map_prefilled_seq_group(prefilled, dummy):
     real_seq.seq_id = dummy_seq.seq_id
     real_seq.status = SequenceStatus.RUNNING
 
+def get_block_id(seq_group: SequenceGroup):
+    seq = seq_group.get_seqs()[0]
+    return block_manager.get_block_table(seq)
 
 async def prefill_push(comm, request_info, request_id):
     # copy the request
@@ -108,8 +114,7 @@ async def prefill_push(comm, request_info, request_id):
     sampling_params = SamplingParams(**request_dict)
     # create a dummy sequence group to reserve cache
     seq_group = await create_seq_group(request_id, prompt, sampling_params)
-    seq = seq_group.get_seqs()[0]
-    block_ids = block_manager.get_block_table(seq)
+    block_ids = get_block_id(seq_group)
     data = await comm.start_prefill(
         http_session, request_info, request_id, block_ids
     )
@@ -136,7 +141,7 @@ async def prefill_pull(comm, request_info, request_id):
         engine,
         "add_request",
         request_id,
-        kv_addr,
+        data['kv_addr'],
         remote_block_id,
         lock=True,
     )
