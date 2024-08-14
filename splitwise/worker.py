@@ -1,5 +1,6 @@
 import random
 from itertools import accumulate
+import os
 
 import torch
 import utils
@@ -9,13 +10,17 @@ from vllm.worker.worker import Worker
 
 
 class SplitWorkerBase(Worker):
-    def setup(self, role):
+    def setup(self, role, port=40000):
         # Assume all tensors are the same
         cache = self.gpu_cache[0]
         assert self.local_rank == cache.device.index
         info = utils.detect_NIC(self.local_rank)
-        addr = f'{info["address"]}:{random.randint(40000, 60000)}'
-        self.kv_comm = KVComm(self.gpu_cache, addr, role)
+        addr = f'{info["address"]}:{port+self.local_rank}'
+        if os.getenv("SERVER_LISTEN_ADDR"):
+            listen_addr = f"{os.getenv('SERVER_LISTEN_ADDR')}:{port+self.local_rank}"
+        else:
+            listen_addr = addr
+        self.kv_comm = KVComm(self.gpu_cache, listen_addr, role)
         return addr
 
     def wait_kv(self, request_id: str):
