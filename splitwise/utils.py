@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import contextlib
 import fcntl
 import json
 import os
@@ -9,13 +8,11 @@ import socket
 import struct
 import subprocess
 import time
-import zlib
 from contextlib import contextmanager
-from functools import lru_cache, partial
+from functools import lru_cache
 from typing import Callable, Set
 
 import torch
-import ucp
 
 from vllm.sequence import SequenceGroup
 from vllm.utils import make_async
@@ -60,16 +57,6 @@ def timer(desc, enable = True):
         print(f"{desc}: {end - start}")
         t.show()
 
-
-def chunk(lst, chunk_size):
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i : i + chunk_size]
-
-
-def hash(*args):
-    return zlib.adler32(repr(args).encode("utf-8"))
-
-
 def deserialize_seq_group(data: str) -> SequenceGroup:
     data = base64.b64decode(data)
     return pickle.loads(data)
@@ -78,16 +65,6 @@ def deserialize_seq_group(data: str) -> SequenceGroup:
 def serialize_seq_group(seq_group: SequenceGroup) -> str:
     data = pickle.dumps(seq_group)
     return base64.b64encode(data).decode("utf-8")
-
-
-@contextlib.asynccontextmanager
-async def async_lock(lock):
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lock.acquire)
-    try:
-        yield  # the lock is held
-    finally:
-        lock.release()
 
 
 def get_real_device_id(device_id):
@@ -171,26 +148,6 @@ def detect_NIC(device_id):
         data = json.load(f)
     return data[str(device_id)]
 
-
-RNDV_THRESH = 8192
-
-
-def set_NIC(device_id, init_ucx=True):
-    info = detect_NIC(device_id)
-    rdma_nic, addr = info["mlx"], info["address"]
-    if init_ucx:
-        ucp.init(
-            options={
-                "NET_DEVICES": f"{rdma_nic}:1",
-                "TLS": "rc_mlx5,cuda",
-                "RNDV_THRESH": str(RNDV_THRESH),
-            },
-            blocking_progress_mode=True,
-        )
-        device = torch.device(f"cuda:{device_id}")
-        am_allocator = partial(torch.zeros, dtype=torch.uint8, device=device)
-        ucp.register_am_allocator(am_allocator, "cuda")
-    return addr
 
 
 async def call_kv_method(engine, method: str, *args, lock=False, **kwargs):
