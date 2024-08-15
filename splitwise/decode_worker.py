@@ -20,8 +20,11 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SequenceGroup, SequenceStatus
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import make_async, random_uuid
+from vllm.logger import init_logger
 
 from Allocator import BlockAllocator
+
+logger = init_logger(__name__)
 
 # global states for this perfill worker
 engine: AsyncLLMEngine
@@ -172,7 +175,9 @@ async def generate(request: Request) -> Response:
     assert "request_id" not in request_info, "The request contains request ID"
 
     # Get a prefill worker
-    addr, host = get_prefill_worker()
+    i = hash(request_id)
+    addr, host = get_prefill_worker(i)
+    logger.info("Request %s: is sent to %s.", request_id, addr)
     comm = PrefillWorker(addr, host)
 
     with timer(f"[test{message}] [{request_id}]") as t:
@@ -249,6 +254,7 @@ if __name__ == "__main__":
     os.environ["WORKER_CLASS"] = (
         "WorkerPull" if args.transfer_mode == "pull" else "WorkerPush"
     )
+    os.environ["VLLM_ENGINE_ITERATION_TIMEOUT_S"] = "600"
 
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.API_SERVER
