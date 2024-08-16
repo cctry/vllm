@@ -1,4 +1,5 @@
 from typing import List, Optional, Tuple
+import os
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
