@@ -14,7 +14,7 @@ from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 
 
-class MultiStepWorker(Worker):
+class MultiStepWorker(Worker, ProposerWorkerBase):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
     allocated enough space to store the additional KV. This reduces overhead
@@ -36,7 +36,7 @@ class MultiStepWorker(Worker):
         super().init_device()
 
         self._proposer = Top1Proposer(
-            weakref.proxy(self),
+            weakref.proxy(self),  # type: ignore[arg-type]
             self.device,
             self.vocab_size,
             max_proposal_len=self.max_model_len,
@@ -45,6 +45,10 @@ class MultiStepWorker(Worker):
     def set_include_gpu_probs_tensor(self) -> None:
         # Need include_gpu_probs_tensor for MultiStepWorker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
+
+    def set_should_modify_greedy_probs_inplace(self) -> None:
+        self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
+            True)
 
     @torch.inference_mode()
     def sampler_output(
@@ -207,9 +211,10 @@ class MultiStepWorker(Worker):
         return self._proposer.get_spec_proposals(
             execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
+    @staticmethod
     def _append_new_tokens(
-            self, model_output: SamplerOutput,
-            seq_group_metadata_list: SequenceGroupMetadata) -> None:
+            model_output: List[SamplerOutput],
+            seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done outside of the worker, but it is
         required if the worker is to perform multiple forward passes.

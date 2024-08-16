@@ -62,7 +62,7 @@ class SpeculativeScores:
 class SpeculativeProposer(ABC):
 
     @abstractmethod
-    def get_proposals(
+    def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
         # If set, this contains all sequence IDs that were assigned
