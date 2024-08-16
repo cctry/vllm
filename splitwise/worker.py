@@ -20,7 +20,7 @@ class SplitWorkerBase(Worker):
             listen_addr = f"{os.getenv('SERVER_LISTEN_ADDR')}:{port+self.local_rank}"
         else:
             listen_addr = addr
-        self.kv_comm = KVComm(self.gpu_cache, listen_addr, role)
+        self.kv_comm = KVComm(self.gpu_cache[0], listen_addr, role)
         return addr
 
     def wait_kv(self, request_id: str):
