@@ -176,7 +176,7 @@ async def generate(request: Request) -> Response:
 
     # Get a prefill worker
     i = hash(request_id)
-    addr, host = get_prefill_worker(i)
+    addr, host = get_prefill_worker(0)
     logger.info("Request %s: is sent to %s.", request_id, addr)
     comm = PrefillWorker(addr, host)
 
@@ -216,7 +216,8 @@ async def generate(request: Request) -> Response:
 async def run(config: uvicorn.Config):
     global http_session, engine, block_manager, scheduler, kv_addr, allocator
     engine.start_background_loop()
-    scheduler = engine.engine.scheduler
+    scheduler = engine.engine.scheduler[0]
+    assert len(engine.engine.scheduler) == 1, "Dose not support PP"
     block_manager = scheduler.block_manager
     kv_addr = await call_kv_method(engine, "decode_kv_init")
     http_session = aiohttp.ClientSession()

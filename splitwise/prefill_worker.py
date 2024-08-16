@@ -25,7 +25,9 @@ background_tasks: Set[asyncio.Task] = set()
 
 
 def free_blocks(blocks):
-    block_manager = engine.engine.scheduler.block_manager
+    scheduler = engine.engine.scheduler[0]
+    assert len(engine.engine.scheduler) == 1, "Dose not support PP"
+    block_manager = scheduler.block_manager
     block_manager._free_block_table(blocks)
 
 

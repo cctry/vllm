@@ -590,7 +590,8 @@ class AsyncLLMEngine:
 
         # prefill worker logic
         if self.is_prefill_worker:
-            scheduler = self.engine.scheduler
+            assert len(self.engine.scheduler) == 0
+            scheduler = self.engine.scheduler[0]
             block_manager = scheduler.block_manager
             block_size = block_manager.block_size
 
