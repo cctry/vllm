@@ -81,7 +81,7 @@ async def create_seq_group(
         request_id=request_id, inputs=inputs
     )
     engine.engine._add_processed_request(
-        request_id, processed_inputs, params, arrival_time, None
+        request_id, processed_inputs, params, arrival_time, None, None
     )
     # remove it from the scheduler
     seq_group = scheduler.waiting.pop()
