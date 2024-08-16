@@ -13,14 +13,16 @@ vLLM is a community project. Our compute resources for development and testing a
 - Databricks
 - DeepInfra
 - Dropbox
+- Google Cloud
 - Lambda Lab
 - NVIDIA
-- Sequoia Capital
 - Replicate
 - Roblox
 - RunPod
+- Sequoia Capital
 - Trainy
 - UC Berkeley
 - UC San Diego
+- ZhenFund
 
 We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.

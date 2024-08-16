@@ -1,5 +1,5 @@
 import weakref
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 
@@ -12,8 +12,8 @@ from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 class NGramWorker(LoraNotSupportedWorkerBase):
     """NGramWorker provides a light drafter without need for model.
 
-    Current NGramWorker only implement prompt lookup decoding,
-    and in future we may also do RAG type drafter and other scenerios
+    Current NGramWorker only implements prompt lookup decoding,
+    and in future we may also do RAG type drafter and other scenarios
     which don't rely on LLM model to give proposals.
     """
 
@@ -36,7 +36,7 @@ class NGramWorker(LoraNotSupportedWorkerBase):
         self.device = torch.device(f"cuda:{self.local_rank}")
         self.load_model = lambda *args, **kwargs: None
 
-        # Current only support Top1Proposer
+        # Current NGramWorker only supports Top1Proposer
         self._proposer = Top1Proposer(
             weakref.proxy(self),
             device=self.device,
@@ -70,7 +70,10 @@ class NGramWorker(LoraNotSupportedWorkerBase):
         self,
         execute_model_req: ExecuteModelRequest,
         sample_len: int,
-    ) -> Tuple[Optional[List[SamplerOutput]], bool]:
+        # Unused parameter. NGramWorker does not use the KV Cache and
+        # therefore does not need this parameter.
+        seq_ids_with_bonus_token_in_last_step: Set[int],
+    ) -> Tuple[Optional[List[Optional[SamplerOutput]]], bool]:
         """NGram match algo to pick proposal candidate. Returns the list of
         sampler output, one per SequenceGroupMetadata.
 
@@ -80,8 +83,8 @@ class NGramWorker(LoraNotSupportedWorkerBase):
         self._raise_if_unsupported(execute_model_req)
 
         has_spec_out = False
-        token_id_list = []
-        token_prob_list = []
+        token_id_list: List[Optional[torch.Tensor]] = []
+        token_prob_list: List[Optional[torch.Tensor]] = []
         for idx, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
@@ -156,12 +159,15 @@ class NGramWorker(LoraNotSupportedWorkerBase):
     def get_spec_proposals(
         self,
         execute_model_req: ExecuteModelRequest,
+        # Unused parameter. NGramWorker does not use the KV Cache and
+        # therefore does not need this parameter.
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
-
-        return self._proposer.get_proposals(execute_model_req)
+        return self._proposer.get_spec_proposals(
+            execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
     def _raise_if_unsupported(
         self,
