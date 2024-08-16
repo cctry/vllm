@@ -10,4 +10,5 @@ TP=8
 
 python api_server.py --model "$model_path/$model_name" \
     --enforce-eager --disable-custom-all-reduce --load-format dummy \
-    -tp "$TP" > "${model_name}_$TP.txt" 2>&1
+    --distributed-executor-backend ray --enable-chunked-prefill False \
+    -tp "$TP" > "${model_name}_$TP.txt"

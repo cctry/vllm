@@ -12,7 +12,7 @@ from vllm.worker.worker import Worker
 class SplitWorkerBase(Worker):
     def setup(self, role, port=40000):
         # Assume all tensors are the same
-        cache = self.gpu_cache[0]
+        cache = self.gpu_cache[0][0] # CSY: Accomodate vllm v0.5
         assert self.local_rank == cache.device.index
         info = utils.detect_NIC(self.local_rank)
         addr = f'{info["address"]}:{port+self.local_rank}'
@@ -20,7 +20,7 @@ class SplitWorkerBase(Worker):
             listen_addr = f"{os.getenv('SERVER_LISTEN_ADDR')}:{port+self.local_rank}"
         else:
             listen_addr = addr
-        self.kv_comm = KVComm(self.gpu_cache, listen_addr, role)
+        self.kv_comm = KVComm(self.gpu_cache[0], listen_addr, role)
         return addr
 
     def wait_kv(self, request_id: str):
