@@ -48,14 +48,18 @@ class Recorder:
 
 
 @contextmanager
-def timer(desc, enable = True):
+def timer(desc, print_time = True, result = None):
     t = Recorder(desc)
     start = time.time()
     yield t
     end = time.time()
-    if enable:
+    if print_time:
         print(f"{desc}: {end - start}")
         t.show()
+    if result is not None:
+        result['total'] = end - start
+        for tag in t.tagged_time.keys():
+            result[tag] = {'time': t.tagged_time[tag], "count": t.tagged_count[tag]}
 
 def deserialize_seq_group(data: str) -> SequenceGroup:
     data = base64.b64decode(data)

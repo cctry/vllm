@@ -180,7 +180,8 @@ async def generate(request: Request) -> Response:
     logger.info("Request %s: is sent to %s.", request_id, addr)
     comm = PrefillWorker(addr, host)
 
-    with timer(f"[test{message}] [{request_id}]") as t:
+    metrics = {}
+    with timer(f"[test{message}] [{request_id}]", result=metrics) as t:
         prefill_cm = t.record("Prefill")
         decode_cm = t.record("Decode")
         prefill_cm.__enter__()
@@ -194,23 +195,23 @@ async def generate(request: Request) -> Response:
         await call_kv_method(engine, "wait_kv", request_id)
         prefill_cm.__exit__(None, None, None)
 
-        decode_cm.__enter__()
 
         # resume inference
         stream = resume_request(request_id, seq_group)
         final_output = None
+        decode_cm.__enter__()
         async for request_output in stream:
             decode_cm.__exit__(None, None, None)
             final_output = request_output
             decode_cm = t.record("Decode")
             decode_cm.__enter__()
         decode_cm.__exit__(None, None, None)
-        t.tagged_time["Decode"] /= t.tagged_count["Decode"] - 1
+        # t.tagged_time["Decode"] /= t.tagged_count["Decode"] - 1
 
     assert final_output is not None
     prompt = final_output.prompt
     text = [prompt + output.text for output in final_output.outputs]
-    return JSONResponse({"request_id": request_id, "text": text})
+    return JSONResponse({"request_id": request_id, "text": text, "metric": metrics})
 
 
 async def run(config: uvicorn.Config):

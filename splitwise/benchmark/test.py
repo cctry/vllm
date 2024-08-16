@@ -2,6 +2,7 @@ import aiohttp
 import asyncio
 from transformers import AutoTokenizer
 import argparse
+import os
 import time
 
 
@@ -15,7 +16,8 @@ async def benchmark(host, payload, qps, num_request):
             async with session.post(url, json=payload) as response:
                 elapsed = time.time() - start_time
                 print(i, response.status, elapsed)
-                return (i, response.status, elapsed)
+                data = await response.json()
+                return (i, response.status, elapsed, data)
         except Exception as e:
             print(e)
             return (i, None, None, str(e))
@@ -28,11 +30,10 @@ async def benchmark(host, payload, qps, num_request):
                 tasks.append(asyncio.create_task(send_request(session, i, url, payload)))
                 await asyncio.sleep(interval)
             results = await asyncio.gather(*tasks)
-            return results
+            return [r[-1] for r in results]
 
-    results = await producer()
-    # for result in results:
-    #     print(result)
+    return await producer()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
@@ -44,6 +45,7 @@ if __name__ == "__main__":
     parser.add_argument("--qps", type=float, default=1)
     parser.add_argument("--num-request", type=int, default=10)
     parser.add_argument("--message", type=str, default="")
+    parser.add_argument("--out-dir", type=str, default=".")
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -68,4 +70,17 @@ if __name__ == "__main__":
         "max_tokens": args.response_length,
     }
 
-    asyncio.run(benchmark(args.host, payload, args.qps, args.num_request))
+    data = asyncio.run(benchmark(args.host, payload, args.qps, args.num_request))
+    model_name = args.model.split("/")[-1]
+    path = os.path.join(args.out_dir, f"{model_name}_prompt{args.prompt_length}_resp{args.response_length}_qps{args.qps}.txt")
+    print(path)
+    with open(path, "w+") as f:
+        for res in data:
+            E2E = res['metric']['total']
+            TTFT = res['metric']['Prefill']['time']
+            TBT = res['metric']['Decode']['time'] / max(1, res['metric']['Decode']['count'] - 1)
+            f.writelines([
+                f"[{res['request_id']}]: {E2E}\n",
+                f"[{res['request_id']}]:Prefill {TTFT}\n",
+                f"[{res['request_id']}]:Decode {TBT}\n"
+            ])
