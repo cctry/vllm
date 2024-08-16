@@ -6,5 +6,8 @@
 #     # "10.121.14.226"
 # ]
 
-def get_prefill_worker():
-    return ("10.121.13.202", 8001)
+
+candidate = ("10.117.208.36", "10.117.208.39")
+
+def get_prefill_worker(i):
+    return (candidate[i % len(candidate)], 8001)

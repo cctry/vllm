@@ -74,7 +74,7 @@ async def generate(request: Request) -> Response:
                 decode_cm.__enter__()
             final_output = request_output
         decode_cm.__exit__(None, None, None)
-        t.tagged_time["Decode"] /= t.tagged_count["Decode"] - 1
+        t.tagged_time["Decode"] /= max(1, t.tagged_count["Decode"] - 1)
 
     assert final_output is not None
     prompt = final_output.prompt
@@ -117,20 +117,29 @@ if __name__ == "__main__":
         engine_args, usage_context=UsageContext.API_SERVER)
     logger.setLevel(30)
     app.root_path = args.root_path
-    # uvicorn.run(app,
-    #             host=args.host,
-    #             port=args.port,
-    #             log_level=args.log_level,
-    #             timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-    #             ssl_keyfile=args.ssl_keyfile,
-    #             ssl_certfile=args.ssl_certfile,
-    #             ssl_ca_certs=args.ssl_ca_certs,
-    #             ssl_cert_reqs=args.ssl_cert_reqs)
-    import asyncio
-    config = uvicorn.Config(
-        app=app,
-        host=args.host,
-        port=args.port,
-        log_level=args.log_level,
-    )
-    asyncio.run(run(config))
+
+        
+    # from vllm.logger import enable_trace_function_call
+    # log_file = f"/dev/shm/vllm_trace.log"
+    # with open(log_file, "w+") as f:
+    #     f.write("")
+    # # enable_trace_function_call(log_file, "/data/vllm/vllm/worker")
+    # enable_trace_function_call(log_file, ["/data/vllm/vllm/executor", "/data/vllm/vllm/model_executor", "/data/vllm/vllm/engine"])
+
+    uvicorn.run(app,
+                host=args.host,
+                port=args.port,
+                log_level=args.log_level,
+                timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile,
+                ssl_ca_certs=args.ssl_ca_certs,
+                ssl_cert_reqs=args.ssl_cert_reqs)
+    # import asyncio
+    # config = uvicorn.Config(
+    #     app=app,
+    #     host=args.host,
+    #     port=args.port,
+    #     log_level=args.log_level,
+    # )
+    # asyncio.run(run(config))
