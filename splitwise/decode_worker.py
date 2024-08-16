@@ -176,7 +176,7 @@ async def generate(request: Request) -> Response:
 
     # Get a prefill worker
     i = hash(request_id)
-    addr, host = get_prefill_worker(0)
+    addr, host = get_prefill_worker(i)
     logger.info("Request %s: is sent to %s.", request_id, addr)
     comm = PrefillWorker(addr, host)
 

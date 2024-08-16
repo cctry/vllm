@@ -5,8 +5,9 @@ import argparse
 import time
 
 
-async def benchmark(url, payload, qps, num_request):
+async def benchmark(host, payload, qps, num_request):
     interval = 1.0 / qps
+    hosts = host.split(',')
 
     async def send_request(session, i, url, payload):
         try:
@@ -23,6 +24,7 @@ async def benchmark(url, payload, qps, num_request):
         async with aiohttp.ClientSession() as session:
             tasks = []
             for i in range(num_request):
+                url = f"http://{hosts[i%len(hosts)]}:{args.port}/generate"
                 tasks.append(asyncio.create_task(send_request(session, i, url, payload)))
                 await asyncio.sleep(interval)
             results = await asyncio.gather(*tasks)
@@ -43,7 +45,6 @@ if __name__ == "__main__":
     parser.add_argument("--num-request", type=int, default=10)
     parser.add_argument("--message", type=str, default="")
     args = parser.parse_args()
-    url = f"http://{args.host}:{args.port}/generate"
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
@@ -67,4 +68,4 @@ if __name__ == "__main__":
         "max_tokens": args.response_length,
     }
 
-    asyncio.run(benchmark(url, payload, args.qps, args.num_request))
+    asyncio.run(benchmark(args.host, payload, args.qps, args.num_request))
