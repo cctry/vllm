@@ -3,48 +3,14 @@
 import time
 from typing import Any, Dict, List, Literal, Optional, Union
 
-import openai.types.chat
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-# pydantic needs the TypedDict from typing_extensions
-from typing_extensions import Annotated, Required, TypedDict
+from typing_extensions import Annotated
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
-
-
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
-
-    type: Required[str]
-    """The type of the content part."""
-
-
-ChatCompletionContentPartParam = Union[
-    openai.types.chat.ChatCompletionContentPartParam,
-    CustomChatCompletionContentPartParam]
-
-
-class CustomChatCompletionMessageParam(TypedDict, total=False):
-    """Enables custom roles in the Chat Completion API."""
-    role: Required[str]
-    """The role of the message's author."""
-
-    content: Union[str, List[ChatCompletionContentPartParam]]
-    """The contents of the message."""
-
-    name: str
-    """An optional name for the participant.
-
-    Provides the model information to differentiate between participants of the
-    same role.
-    """
-
-
-ChatCompletionMessageParam = Union[
-    openai.types.chat.ChatCompletionMessageParam,
-    CustomChatCompletionMessageParam]
 
 
 class OpenAIBaseModel(BaseModel):
@@ -102,6 +68,11 @@ class ResponseFormat(OpenAIBaseModel):
     type: Literal["text", "json_object"]
 
 
+class StreamOptions(OpenAIBaseModel):
+    include_usage: Optional[bool] = True
+    continuous_usage_stats: Optional[bool] = True
+
+
 class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: Optional[str] = None
@@ -140,6 +111,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                 le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[ChatCompletionToolsParam]] = None
@@ -149,47 +121,64 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # doc: begin-chat-completion-sampling-params
     best_of: Optional[int] = None
-    use_beam_search: Optional[bool] = False
-    top_k: Optional[int] = -1
-    min_p: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.0
-    length_penalty: Optional[float] = 1.0
-    early_stopping: Optional[bool] = False
-    ignore_eos: Optional[bool] = False
-    min_tokens: Optional[int] = 0
+    use_beam_search: bool = False
+    top_k: int = -1
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
+    length_penalty: float = 1.0
+    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-    skip_special_tokens: Optional[bool] = True
-    spaces_between_special_tokens: Optional[bool] = True
+    include_stop_str_in_output: bool = False
+    ignore_eos: bool = False
+    min_tokens: int = 0
+    skip_special_tokens: bool = True
+    spaces_between_special_tokens: bool = True
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     # doc: end-chat-completion-sampling-params
 
     # doc: begin-chat-completion-extra-params
-    echo: Optional[bool] = Field(
+    echo: bool = Field(
         default=False,
         description=(
             "If true, the new message will be prepended with the last message "
             "if they belong to the same role."),
     )
-    add_generation_prompt: Optional[bool] = Field(
+    add_generation_prompt: bool = Field(
         default=True,
         description=
         ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
     )
-    add_special_tokens: Optional[bool] = Field(
+    add_special_tokens: bool = Field(
         default=False,
         description=(
             "If true, special tokens (e.g. BOS) will be added to the prompt "
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
-            "special tokens so this should be set to False (as is the "
+            "special tokens so this should be set to false (as is the "
             "default)."),
     )
-    include_stop_str_in_output: Optional[bool] = Field(
-        default=False,
+    documents: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description=
+        ("A list of dicts representing documents that will be accessible to "
+         "the model if it is performing RAG (retrieval-augmented generation)."
+         " If the template does not support RAG, this argument will have no "
+         "effect. We recommend that each document should be a dict containing "
+         "\"title\" and \"text\" keys."),
+    )
+    chat_template: Optional[str] = Field(
+        default=None,
         description=(
-            "Whether to include the stop string in the output. "
-            "This is only applied when the stop or stop_token_ids is set."),
+            "A Jinja template to use for this conversion. "
+            "If this is not passed, the model's default chat template will be "
+            "used instead."),
+    )
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -229,37 +218,44 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         logits_processors = None
         if self.logit_bias:
+            logit_bias: Dict[int, float] = {}
+            try:
+                for token_id, bias in self.logit_bias.items():
+                    # Convert token_id to integer before we add to LLMEngine
+                    # Clamp the bias between -100 and 100 per OpenAI API spec
+                    logit_bias[int(token_id)] = min(100, max(-100, bias))
+            except ValueError as exc:
+                raise ValueError(f"Found token_id `{token_id}` in logit_bias "
+                                 f"but token_id must be an integer or string "
+                                 f"representing an integer") from exc
 
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
-                for token_id, bias in self.logit_bias.items():
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    bias = min(100, max(-100, bias))
-                    logits[int(token_id)] += bias
+                for token_id, bias in logit_bias.items():
+                    logits[token_id] += bias
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
 
         return SamplingParams(
             n=self.n,
+            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=self.repetition_penalty,
             temperature=self.temperature,
             top_p=self.top_p,
+            top_k=self.top_k,
             min_p=self.min_p,
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
-            max_tokens=self.max_tokens,
-            min_tokens=self.min_tokens,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=self.top_logprobs if self.echo else None,
-            best_of=self.best_of,
-            top_k=self.top_k,
             ignore_eos=self.ignore_eos,
+            max_tokens=self.max_tokens,
+            min_tokens=self.min_tokens,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
@@ -267,7 +263,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
+
+    @model_validator(mode='before')
+    @classmethod
+    def validate_stream_options(cls, values):
+        if (values.get('stream_options') is not None
+                and not values.get('stream')):
+            raise ValueError(
+                "stream_options can only be set if stream is true")
+        return values
 
     @model_validator(mode="before")
     @classmethod
@@ -308,9 +314,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
-            elif not 0 <= data["top_logprobs"] <= 20:
+            elif data["top_logprobs"] < 0:
                 raise ValueError(
-                    "`top_logprobs` must be a value in the interval [0, 20].")
+                    "`top_logprobs` must be a value a positive value.")
         return data
 
 
@@ -332,32 +338,34 @@ class CompletionRequest(OpenAIBaseModel):
                                 le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
     temperature: Optional[float] = 1.0
     top_p: Optional[float] = 1.0
     user: Optional[str] = None
 
     # doc: begin-completion-sampling-params
-    use_beam_search: Optional[bool] = False
-    top_k: Optional[int] = -1
-    min_p: Optional[float] = 0.0
-    repetition_penalty: Optional[float] = 1.0
-    length_penalty: Optional[float] = 1.0
-    early_stopping: Optional[bool] = False
+    use_beam_search: bool = False
+    top_k: int = -1
+    min_p: float = 0.0
+    repetition_penalty: float = 1.0
+    length_penalty: float = 1.0
+    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
-    ignore_eos: Optional[bool] = False
-    min_tokens: Optional[int] = 0
-    skip_special_tokens: Optional[bool] = True
-    spaces_between_special_tokens: Optional[bool] = True
+    include_stop_str_in_output: bool = False
+    ignore_eos: bool = False
+    min_tokens: int = 0
+    skip_special_tokens: bool = True
+    spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
-    include_stop_str_in_output: Optional[bool] = Field(
-        default=False,
+    add_special_tokens: bool = Field(
+        default=True,
         description=(
-            "Whether to include the stop string in the output. "
-            "This is only applied when the stop or stop_token_ids is set."),
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."),
     )
     response_format: Optional[ResponseFormat] = Field(
         default=None,
@@ -404,15 +412,22 @@ class CompletionRequest(OpenAIBaseModel):
 
         logits_processors = None
         if self.logit_bias:
+            logit_bias: Dict[int, float] = {}
+            try:
+                for token_id, bias in self.logit_bias.items():
+                    # Convert token_id to integer
+                    # Clamp the bias between -100 and 100 per OpenAI API spec
+                    logit_bias[int(token_id)] = min(100, max(-100, bias))
+            except ValueError as exc:
+                raise ValueError(f"Found token_id `{token_id}` in logit_bias "
+                                 f"but token_id must be an integer or string "
+                                 f"representing an integer") from exc
 
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
-                for token_id, bias in self.logit_bias.items():
-                    # Clamp the bias between -100 and 100 per OpenAI API spec
-                    bias = min(100, max(-100, bias))
-                    logits[int(token_id)] += bias
+                for token_id, bias in logit_bias.items():
+                    logits[token_id] += bias
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
@@ -430,15 +445,15 @@ class CompletionRequest(OpenAIBaseModel):
             seed=self.seed,
             stop=self.stop,
             stop_token_ids=self.stop_token_ids,
+            logprobs=self.logprobs,
             ignore_eos=self.ignore_eos,
             max_tokens=self.max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
-            logprobs=self.logprobs,
             use_beam_search=self.use_beam_search,
             early_stopping=self.early_stopping,
             prompt_logprobs=self.logprobs if self.echo else None,
             skip_special_tokens=self.skip_special_tokens,
-            spaces_between_special_tokens=(self.spaces_between_special_tokens),
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             length_penalty=self.length_penalty,
             logits_processors=logits_processors,
@@ -463,13 +478,20 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if "logprobs" in data and data[
-                "logprobs"] is not None and not 0 <= data["logprobs"] <= 5:
-            raise ValueError(("if passed, `logprobs` must be a value",
-                              " in the interval [0, 5]."))
+                "logprobs"] is not None and not data["logprobs"] >= 0:
+            raise ValueError("if passed, `logprobs` must be a positive value.")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_options(cls, data):
+        if data.get("stream_options") and not data.get("stream"):
+            raise ValueError(
+                "Stream options can only be defined when stream is true.")
         return data
 
 
-class EmbeddingRequest(BaseModel):
+class EmbeddingRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str
@@ -491,7 +513,8 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
-    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
+    top_logprobs: List[Optional[Dict[str,
+                                     float]]] = Field(default_factory=list)
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
@@ -540,13 +563,13 @@ class CompletionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class EmbeddingResponseData(BaseModel):
+class EmbeddingResponseData(OpenAIBaseModel):
     index: int
     object: str = "embedding"
-    embedding: List[float]
+    embedding: Union[List[float], str]
 
 
-class EmbeddingResponse(BaseModel):
+class EmbeddingResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: str = "list"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -590,7 +613,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
 
 
@@ -613,7 +636,7 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
-    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
 
 
@@ -645,8 +668,19 @@ class BatchRequestInput(OpenAIBaseModel):
     # /v1/chat/completions is supported.
     url: str
 
-    # The parameteters of the request.
-    body: Union[ChatCompletionRequest, ]
+    # The parameters of the request.
+    body: ChatCompletionRequest
+
+
+class BatchResponseData(OpenAIBaseModel):
+    # HTTP status code of the response.
+    status_code: int = 200
+
+    # An unique identifier for the API request.
+    request_id: str
+
+    # The body of the response.
+    body: Optional[ChatCompletionResponse] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -660,8 +694,41 @@ class BatchRequestOutput(OpenAIBaseModel):
     # inputs.
     custom_id: str
 
-    response: Optional[ChatCompletionResponse]
+    response: Optional[BatchResponseData]
 
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
     error: Optional[Any]
+
+
+class TokenizeCompletionRequest(OpenAIBaseModel):
+    model: str
+    prompt: str
+
+    add_special_tokens: bool = Field(default=True)
+
+
+class TokenizeChatRequest(OpenAIBaseModel):
+    model: str
+    messages: List[ChatCompletionMessageParam]
+
+    add_generation_prompt: bool = Field(default=True)
+    add_special_tokens: bool = Field(default=False)
+
+
+TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
+
+
+class TokenizeResponse(OpenAIBaseModel):
+    count: int
+    max_model_len: int
+    tokens: List[int]
+
+
+class DetokenizeRequest(OpenAIBaseModel):
+    model: str
+    tokens: List[int]
+
+
+class DetokenizeResponse(OpenAIBaseModel):
+    prompt: str

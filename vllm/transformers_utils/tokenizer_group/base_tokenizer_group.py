@@ -3,11 +3,18 @@ from typing import List, Optional
 
 from transformers import PreTrainedTokenizer
 
+from vllm.config import TokenizerPoolConfig
 from vllm.lora.request import LoRARequest
 
 
 class BaseTokenizerGroup(ABC):
     """A group of tokenizers that can be used for LoRA adapters."""
+
+    @classmethod
+    @abstractmethod
+    def from_config(cls, tokenizer_pool_config: Optional[TokenizerPoolConfig],
+                    **init_kwargs) -> "BaseTokenizerGroup":
+        pass
 
     @abstractmethod
     def ping(self) -> bool:
@@ -53,3 +60,7 @@ class BaseTokenizerGroup(ABC):
     ) -> "PreTrainedTokenizer":
         """Get a tokenizer for a LoRA request."""
         pass
+
+    def check_health(self):
+        """Raise exception if the tokenizer group is unhealthy."""
+        return
